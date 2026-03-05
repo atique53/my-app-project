@@ -38,10 +38,15 @@ import {
   ClipboardList,
   CheckCircle2,
   Circle,
-  Calendar
+  Calendar,
+  Moon,
+  Sun,
+  Command,
+  Menu
 } from 'lucide-react';
 import Papa from 'papaparse';
 import { motion, AnimatePresence } from 'framer-motion';
+
 import { 
   LineChart, 
   Line, 
@@ -120,12 +125,27 @@ export default function App() {
   const [notes, setNotes] = useState<Note[]>([]);
   const [newNote, setNewNote] = useState('');
   const [showNoteHistory, setShowNoteHistory] = useState(false);
+  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+  const [isGlobalSearchOpen, setIsGlobalSearchOpen] = useState(false);
+  const [globalSearchQuery, setGlobalSearchQuery] = useState('');
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [isDataLoaded, setIsDataLoaded] = useState(false);
+  const [runningPrograms, setRunningPrograms] = useState<Record<string, boolean>>({});
+  
+  // Theme-aware styles
+  const inputBg = theme === 'dark' ? 'bg-slate-800' : 'bg-slate-100';
+  const inputBgDeep = theme === 'dark' ? 'bg-slate-900' : 'bg-slate-200';
+  const textColor = theme === 'dark' ? 'text-slate-200' : 'text-slate-800';
+  const headingColor = theme === 'dark' ? 'text-white' : 'text-slate-900';
+  const borderColor = theme === 'dark' ? 'border-white/5' : 'border-slate-200';
+  const mutedText = theme === 'dark' ? 'text-slate-500' : 'text-slate-400';
   
   // Filter States
   const [filterStartDate, setFilterStartDate] = useState('');
   const [filterEndDate, setFilterEndDate] = useState('');
   const [filterType, setFilterType] = useState<'all' | 'receive' | 'delivery' | 'bill'>('all');
   const [filterPkgType, setFilterPkgType] = useState<'all' | 'Package' | 'Non-Package'>('all');
+  const [filterMonth, setFilterMonth] = useState<string>('all');
   
   // Form State
   const [formData, setFormData] = useState<FormData>({
@@ -147,6 +167,22 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const csvInputRef = useRef<HTMLInputElement>(null);
   const paidInputRef = useRef<HTMLInputElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // Keyboard Shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault();
+        setIsGlobalSearchOpen(true);
+      }
+      if (e.key === 'Escape') {
+        setIsGlobalSearchOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   // Sync billEntry with calculateBilling in delivery mode
   useEffect(() => {
@@ -162,46 +198,91 @@ export default function App() {
   useEffect(() => {
     const loadData = async () => {
       try {
+        console.log('Fetching data from server...');
         const response = await fetch('/api/data');
         if (response.ok) {
           const data = await response.json();
+          console.log('Data loaded from server:', data);
           if (data.transactions) setTransactions(data.transactions);
           if (data.manager) setManager(data.manager);
           if (data.notes) setNotes(data.notes);
+          if (data.runningPrograms) setRunningPrograms(data.runningPrograms);
+        } else {
+          throw new Error('Server response not ok');
         }
       } catch (error) {
-        console.error('Failed to load data:', error);
+        console.error('Failed to load data from server, trying localStorage:', error);
         // Fallback to localStorage if server fails
         const savedData = localStorage.getItem('inventory_billing_data');
         const savedManager = localStorage.getItem('inventory_billing_manager');
         const savedNotes = localStorage.getItem('inventory_billing_notes');
+        const savedRunning = localStorage.getItem('inventory_billing_running');
         if (savedData) setTransactions(JSON.parse(savedData));
         if (savedManager) setManager(JSON.parse(savedManager));
         if (savedNotes) setNotes(JSON.parse(savedNotes));
+        if (savedRunning) setRunningPrograms(JSON.parse(savedRunning));
+      } finally {
+        setIsDataLoaded(true);
       }
     };
     loadData();
   }, []);
 
+  // Auto-save whenever data changes, but only after initial load
+  useEffect(() => {
+    if (isDataLoaded) {
+      const timer = setTimeout(() => {
+        saveData(transactions, manager, notes, runningPrograms);
+      }, 2000); // Debounce save to 2 seconds
+      return () => clearTimeout(timer);
+    }
+  }, [transactions, manager, notes, runningPrograms, isDataLoaded]);
+
+  // Auto-generate Challan Reference
+  useEffect(() => {
+    if (!editingId && (formData.type === 'receive' || formData.type === 'delivery')) {
+      const qty = formData.type === 'receive' ? formData.amount : formData.orderQty;
+      if (formData.fabricName && qty) {
+        const autoRef = `${formData.fabricName}_${qty}`;
+        setFormData(prev => ({ ...prev, challan: autoRef }));
+      }
+    }
+  }, [formData.fabricName, formData.amount, formData.orderQty, formData.type, editingId]);
+
   // Save data to server
-  const saveData = async (currentTransactions: Transaction[], currentManager: Manager, currentNotes?: Note[]) => {
+  const saveData = async (currentTransactions: Transaction[], currentManager: Manager, currentNotes?: Note[], currentRunning?: Record<string, boolean>) => {
+    if (!isDataLoaded) return; // Prevent saving before loading
+    
     setIsSaving(true);
     try {
-      await fetch('/api/data', {
+      const payload = { 
+        transactions: currentTransactions, 
+        manager: currentManager,
+        notes: currentNotes || notes,
+        runningPrograms: currentRunning || runningPrograms
+      };
+      
+      const response = await fetch('/api/data', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          transactions: currentTransactions, 
-          manager: currentManager,
-          notes: currentNotes || notes
-        }),
+        body: JSON.stringify(payload),
       });
+
+      if (!response.ok) throw new Error('Failed to save to server');
+
       // Also save to localStorage as backup
       localStorage.setItem('inventory_billing_data', JSON.stringify(currentTransactions));
       localStorage.setItem('inventory_billing_manager', JSON.stringify(currentManager));
       localStorage.setItem('inventory_billing_notes', JSON.stringify(currentNotes || notes));
+      localStorage.setItem('inventory_billing_running', JSON.stringify(currentRunning || runningPrograms));
+      console.log('Data saved successfully');
     } catch (error) {
       console.error('Failed to save data:', error);
+      // Still save to localStorage even if server fails
+      localStorage.setItem('inventory_billing_data', JSON.stringify(currentTransactions));
+      localStorage.setItem('inventory_billing_manager', JSON.stringify(currentManager));
+      localStorage.setItem('inventory_billing_notes', JSON.stringify(currentNotes || notes));
+      localStorage.setItem('inventory_billing_running', JSON.stringify(currentRunning || runningPrograms));
     } finally {
       setIsSaving(false);
     }
@@ -214,7 +295,7 @@ export default function App() {
       reader.onloadend = () => {
         const newManager = { ...manager, photo: reader.result as string };
         setManager(newManager);
-        saveData(transactions, newManager);
+        saveData(transactions, newManager, notes, runningPrograms);
       };
       reader.readAsDataURL(file);
     }
@@ -223,7 +304,7 @@ export default function App() {
   const saveProfile = () => {
     const newManager = { ...manager, name: tempManagerName };
     setManager(newManager);
-    saveData(transactions, newManager);
+    saveData(transactions, newManager, notes, runningPrograms);
     setIsProfileModalOpen(false);
   };
 
@@ -250,7 +331,7 @@ export default function App() {
           if (json.transactions && json.manager) {
             setTransactions(json.transactions);
             setManager(json.manager);
-            saveData(json.transactions, json.manager);
+            saveData(json.transactions, json.manager, notes, runningPrograms);
             alert('Data imported successfully!');
           } else {
             alert('Invalid backup file format.');
@@ -428,19 +509,58 @@ export default function App() {
     const matchesEndDate = !filterEndDate || t.date <= filterEndDate;
     const matchesType = filterType === 'all' || t.type === filterType;
     const matchesPkgType = filterPkgType === 'all' || t.pkgType === filterPkgType;
+    
+    const tDate = new Date(t.date);
+    const tMonth = tDate.toLocaleString('en-US', { month: 'long' });
+    const matchesMonth = filterMonth === 'all' || tMonth === filterMonth;
 
-    return matchesSearch && matchesStartDate && matchesEndDate && matchesType && matchesPkgType;
+    return matchesSearch && matchesStartDate && matchesEndDate && matchesType && matchesPkgType && matchesMonth;
   });
 
-  const buyerDues = transactions.reduce((acc, t) => {
+  const filteredStats = filteredTransactions.reduce((acc, t) => {
+    acc.received += (Number(t.receiveQty) || 0);
+    acc.ordered += (Number(t.orderQty) || 0);
+    acc.actualDelivered += (Number(t.delvA) || 0) + (Number(t.delvB) || 0);
+    acc.bill += (Number(t.bill) || 0);
+    acc.paid += (Number(t.paid) || 0);
+    return acc;
+  }, { received: 0, ordered: 0, actualDelivered: 0, bill: 0, paid: 0 });
+
+  const buyerBalances = transactions.reduce((acc, t) => {
     const bill = Number(t.bill) || 0;
     const paid = Number(t.paid) || 0;
-    const due = bill - paid;
-    if (due > 0) {
-      acc[t.buyer] = (acc[t.buyer] || 0) + due;
-    }
+    if (!acc[t.buyer]) acc[t.buyer] = 0;
+    acc[t.buyer] += (bill - paid);
     return acc;
   }, {} as Record<string, number>);
+
+  const buyerDues = Object.entries(buyerBalances)
+    .filter(([_, balance]) => balance > 0)
+    .reduce((acc, [buyer, balance]) => ({ ...acc, [buyer]: balance }), {} as Record<string, number>);
+
+  const buyerAdvances = Object.entries(buyerBalances)
+    .filter(([_, balance]) => balance < 0)
+    .reduce((acc, [buyer, balance]) => ({ ...acc, [buyer]: Math.abs(balance) }), {} as Record<string, number>);
+
+  // Calculate Pending Grey Stock per Buyer/Fabric
+  const pendingGreyStock = transactions.reduce((acc, t) => {
+    const key = `${t.buyer}|${t.fabricName}`;
+    if (!acc[key]) {
+      acc[key] = { buyer: t.buyer, fabric: t.fabricName, received: 0, ordered: 0 };
+    }
+    acc[key].received += (Number(t.receiveQty) || 0);
+    acc[key].ordered += (Number(t.orderQty) || 0);
+    return acc;
+  }, {} as Record<string, { buyer: string, fabric: string, received: number, ordered: number }>);
+
+  const topPendingGrey = Object.values(pendingGreyStock)
+    .map(item => ({ ...item, balance: item.received - item.ordered, isRunning: runningPrograms[`${item.buyer}|${item.fabric}`] || false }))
+    .filter(item => item.balance > 0)
+    .sort((a, b) => {
+      if (a.isRunning && !b.isRunning) return -1;
+      if (!a.isRunning && b.isRunning) return 1;
+      return b.balance - a.balance;
+    });
 
   const sortedTransactions = [...filteredTransactions].sort((a, b) => {
     const aDue = a.bill - a.paid;
@@ -458,9 +578,10 @@ export default function App() {
     const summary = buyerTransactions.reduce((acc, t) => ({
       received: acc.received + t.receiveQty,
       ordered: acc.ordered + t.orderQty,
+      actualDelivered: acc.actualDelivered + (t.delvA + t.delvB),
       bill: acc.bill + t.bill,
       paid: acc.paid + t.paid,
-    }), { received: 0, ordered: 0, bill: 0, paid: 0 });
+    }), { received: 0, ordered: 0, actualDelivered: 0, bill: 0, paid: 0 });
     
     return { transactions: buyerTransactions, summary };
   };
@@ -482,7 +603,11 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen flex flex-col lg:flex-row bg-[#020617] text-slate-200 selection:bg-indigo-500/30">
+    <div className={cn(
+      "min-h-screen flex flex-col lg:flex-row transition-colors duration-500 selection:bg-indigo-500/30",
+      theme,
+      theme === 'dark' ? "bg-[#020617] text-slate-200" : "bg-slate-50 text-slate-900"
+    )}>
       <input 
         type="file" 
         ref={fileInputRef} 
@@ -497,16 +622,164 @@ export default function App() {
         accept=".csv" 
         onChange={handleCSVImport} 
       />
+      {/* Global Search Modal */}
+      <AnimatePresence>
+        {isGlobalSearchOpen && (
+          <div className="fixed inset-0 z-[100] flex items-start justify-center pt-[10vh] px-4">
+            <motion.div 
+              initial={{ opacity: 0 }} 
+              animate={{ opacity: 1 }} 
+              exit={{ opacity: 0 }}
+              onClick={() => setIsGlobalSearchOpen(false)}
+              className="absolute inset-0 bg-slate-950/60 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: -20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: -20 }}
+              className={cn(
+                "relative w-full max-w-2xl rounded-3xl shadow-2xl overflow-hidden border transition-colors duration-500",
+                theme === 'dark' ? "bg-slate-900 border-white/10" : "bg-white border-slate-200"
+              )}
+            >
+              <div className={cn(
+                "p-4 border-b flex items-center gap-4",
+                theme === 'dark' ? "border-white/5" : "border-slate-100"
+              )}>
+                <Search className="w-5 h-5 text-slate-500" />
+                <input 
+                  autoFocus
+                  type="text" 
+                  placeholder="Search transactions, buyers, fabrics, challans..." 
+                  value={globalSearchQuery}
+                  onChange={e => setGlobalSearchQuery(e.target.value)}
+                  className={cn(
+                    "flex-1 bg-transparent border-none outline-none text-lg placeholder:text-slate-600",
+                    theme === 'dark' ? "text-white" : "text-slate-900"
+                  )}
+                />
+                <div className={cn(
+                  "flex items-center gap-2 px-2 py-1 rounded-lg border",
+                  theme === 'dark' ? "bg-slate-800/50 border-white/5" : "bg-slate-100 border-slate-200"
+                )}>
+                  <Command className="w-3 h-3 text-slate-500" />
+                  <span className="text-[10px] font-bold text-slate-500">ESC</span>
+                </div>
+              </div>
+              
+              <div className="max-h-[60vh] overflow-y-auto p-2 custom-scrollbar">
+                {globalSearchQuery.trim() === '' ? (
+                  <div className="p-8 text-center">
+                    <div className="w-12 h-12 bg-indigo-500/10 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                      <Search className="w-6 h-6 text-indigo-400" />
+                    </div>
+                    <p className="text-sm font-bold text-slate-400 uppercase tracking-widest">Global Search</p>
+                    <p className="text-xs text-slate-500 mt-2">Start typing to search across the entire ledger...</p>
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    {transactions
+                      .filter(t => 
+                        t.buyer.toLowerCase().includes(globalSearchQuery.toLowerCase()) ||
+                        t.fabricName.toLowerCase().includes(globalSearchQuery.toLowerCase()) ||
+                        t.challan.toLowerCase().includes(globalSearchQuery.toLowerCase()) ||
+                        t.type.toLowerCase().includes(globalSearchQuery.toLowerCase())
+                      )
+                      .slice(0, 20)
+                      .map(t => (
+                        <button 
+                          key={t.id}
+                          onClick={() => {
+                            setFilterBuyer(t.buyer);
+                            setIsGlobalSearchOpen(false);
+                            setGlobalSearchQuery('');
+                            document.getElementById('ledger-section')?.scrollIntoView({ behavior: 'smooth' });
+                          }}
+                          className={cn(
+                            "w-full flex items-center justify-between p-4 rounded-2xl transition-all text-left group",
+                            theme === 'dark' ? "hover:bg-white/5" : "hover:bg-slate-50"
+                          )}
+                        >
+                          <div className="flex items-center gap-4">
+                            <div className={cn(
+                              "p-2.5 rounded-xl border",
+                              t.type === 'receive' ? "bg-blue-500/10 border-blue-500/20 text-blue-400" :
+                              t.type === 'delivery' ? "bg-indigo-500/10 border-indigo-500/20 text-indigo-400" :
+                              "bg-emerald-500/10 border-emerald-500/20 text-emerald-400"
+                            )}>
+                              {t.type === 'receive' ? <Inbox className="w-4 h-4" /> : 
+                               t.type === 'delivery' ? <Truck className="w-4 h-4" /> : 
+                               <Banknote className="w-4 h-4" />}
+                            </div>
+                            <div>
+                              <p className={cn(
+                                "font-bold transition-colors",
+                                theme === 'dark' ? "text-white group-hover:text-indigo-400" : "text-slate-900 group-hover:text-indigo-600"
+                              )}>{t.buyer}</p>
+                              <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest mt-0.5">
+                                {t.fabricName} • Ref: {t.challan}
+                              </p>
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-xs font-bold text-slate-400">{t.date}</p>
+                            <p className="text-[10px] text-slate-600 uppercase font-bold mt-1">{t.type}</p>
+                          </div>
+                        </button>
+                      ))
+                    }
+                    {transactions.filter(t => 
+                      t.buyer.toLowerCase().includes(globalSearchQuery.toLowerCase()) ||
+                      t.fabricName.toLowerCase().includes(globalSearchQuery.toLowerCase()) ||
+                      t.challan.toLowerCase().includes(globalSearchQuery.toLowerCase())
+                    ).length === 0 && (
+                      <div className="p-8 text-center">
+                        <p className="text-sm font-bold text-slate-500 uppercase">No results found</p>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Sidebar Overlay for Mobile */}
+      <AnimatePresence>
+        {isSidebarOpen && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setIsSidebarOpen(false)}
+            className="fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-[45] lg:hidden"
+          />
+        )}
+      </AnimatePresence>
+
       {/* Sidebar */}
-      <aside className="w-full lg:w-72 bg-[#0f172a]/40 backdrop-blur-3xl border-r border-white/5 p-6 flex flex-col gap-8 print:hidden">
-        <div className="flex items-center gap-3 px-2">
-          <div className="bg-gradient-to-br from-indigo-500 to-purple-600 p-2.5 rounded-2xl shadow-lg shadow-indigo-500/20">
-            <Factory className="w-6 h-6 text-white" />
+      <aside className={cn(
+        "fixed inset-y-0 left-0 z-[50] w-72 border-r p-6 flex flex-col gap-8 print:hidden transition-all duration-500 lg:relative lg:translate-x-0",
+        theme === 'dark' ? "bg-[#0f172a] border-white/5" : "bg-white border-slate-200 shadow-2xl lg:shadow-none",
+        isSidebarOpen ? "translate-x-0" : "-translate-x-full"
+      )}>
+        <div className="flex items-center justify-between lg:justify-start gap-3 px-2">
+          <div className="flex items-center gap-3">
+            <div className="bg-gradient-to-br from-indigo-500 to-purple-600 p-2.5 rounded-2xl shadow-lg shadow-indigo-500/20">
+              <Factory className="w-6 h-6 text-white" />
+            </div>
+            <div>
+              <h1 className="text-lg font-black tracking-tight text-white leading-none">PROFABRIC</h1>
+              <p className="text-[10px] font-bold text-indigo-400 tracking-[0.2em] mt-1">ELITE LEDGER</p>
+            </div>
           </div>
-          <div>
-            <h1 className="text-lg font-black tracking-tight text-white leading-none">PROFABRIC</h1>
-            <p className="text-[10px] font-bold text-indigo-400 tracking-[0.2em] mt-1">ELITE LEDGER</p>
-          </div>
+          <button 
+            onClick={() => setIsSidebarOpen(false)}
+            className="p-2 hover:bg-white/5 rounded-xl text-slate-500 lg:hidden"
+          >
+            <X className="w-5 h-5" />
+          </button>
         </div>
 
         {/* Manager Profile */}
@@ -554,6 +827,7 @@ export default function App() {
                 icon={<LayoutDashboard className="w-4 h-4" />} 
                 label="Dashboard" 
                 active={activeTab === 'Dashboard'} 
+                theme={theme}
                 onClick={() => {
                   setActiveTab('Dashboard');
                   window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -563,6 +837,7 @@ export default function App() {
                 icon={<History className="w-4 h-4" />} 
                 label="History" 
                 active={activeTab === 'History'}
+                theme={theme}
                 onClick={() => {
                   setActiveTab('History');
                   document.getElementById('ledger-section')?.scrollIntoView({ behavior: 'smooth' });
@@ -572,6 +847,7 @@ export default function App() {
                 icon={<CreditCard className="w-4 h-4" />} 
                 label="Payments" 
                 active={activeTab === 'Payments'}
+                theme={theme}
                 onClick={() => {
                   setActiveTab('Payments');
                   document.getElementById('dues-section')?.scrollIntoView({ behavior: 'smooth' });
@@ -592,7 +868,10 @@ export default function App() {
               </button>
               <button 
                 onClick={() => csvInputRef.current?.click()}
-                className="w-full flex items-center gap-3 px-4 py-3 rounded-2xl bg-slate-800 text-slate-300 font-bold hover:bg-slate-700 transition-all border border-white/5"
+                className={cn(
+                  "w-full flex items-center gap-3 px-4 py-3 rounded-2xl font-bold transition-all border",
+                  theme === 'dark' ? "bg-slate-800 text-slate-300 hover:bg-slate-700 border-white/5" : "bg-slate-100 text-slate-700 hover:bg-slate-200 border-slate-200"
+                )}
               >
                 <Upload className="w-4 h-4" />
                 Import CSV
@@ -609,9 +888,9 @@ export default function App() {
           </div>
 
           {/* Notes Section */}
-          <div className="pt-4 border-t border-white/5">
+          <div className={cn("pt-4 border-t", theme === 'dark' ? "border-white/5" : "border-slate-100")}>
             <div className="flex items-center justify-between px-4 mb-4">
-              <p className="text-[11px] font-bold text-slate-500 uppercase tracking-widest">Buyer Notes</p>
+              <p className={cn("text-[11px] font-bold uppercase tracking-widest", mutedText)}>Buyer Notes</p>
               <button 
                 onClick={() => setShowNoteHistory(!showNoteHistory)}
                 className="text-[10px] font-bold text-indigo-400 hover:text-indigo-300 transition-colors flex items-center gap-1"
@@ -643,7 +922,10 @@ export default function App() {
                         saveData(transactions, manager, updatedNotes);
                       }
                     }}
-                    className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-xs text-white placeholder:text-slate-600 focus:ring-1 focus:ring-indigo-500 outline-none transition-all"
+                    className={cn(
+                      "w-full border rounded-xl px-3 py-2 text-xs outline-none transition-all",
+                      inputBg, borderColor, theme === 'dark' ? "text-white placeholder:text-slate-600" : "text-slate-900 placeholder:text-slate-400"
+                    )}
                   />
                   <PlusCircle className="absolute right-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-600" />
                 </div>
@@ -656,7 +938,7 @@ export default function App() {
                   key={note.id} 
                   className={cn(
                     "group flex items-center gap-3 px-3 py-2 rounded-xl transition-all",
-                    note.completed ? "opacity-50" : "hover:bg-white/5"
+                    note.completed ? "opacity-50" : (theme === 'dark' ? "hover:bg-white/5" : "hover:bg-slate-50")
                   )}
                 >
                   <button 
@@ -673,7 +955,7 @@ export default function App() {
                     {note.completed && <CheckCircle2 className="w-2.5 h-2.5 text-white" />}
                   </button>
                   <div className="flex-1 min-w-0">
-                    <p className={cn("text-xs truncate", note.completed ? "text-slate-500 line-through" : "text-slate-300")}>
+                    <p className={cn("text-xs truncate", note.completed ? "text-slate-500 line-through" : (theme === 'dark' ? "text-slate-300" : "text-slate-700"))}>
                       {note.text}
                     </p>
                     <p className="text-[9px] text-slate-600 mt-0.5">
@@ -713,67 +995,317 @@ export default function App() {
       </aside>
 
       {/* Main Content */}
-      <main className="flex-1 p-6 lg:p-10 overflow-y-auto max-h-screen custom-scrollbar bg-gradient-to-br from-[#020617] via-[#020617] to-indigo-950/20">
-        <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-10 print:hidden">
-          <div>
-            <h2 className="text-3xl font-black tracking-tighter text-white bg-clip-text text-transparent bg-gradient-to-r from-white via-white to-indigo-400">Operations Command Center</h2>
-            <p className="text-slate-500 text-xs font-bold uppercase tracking-[0.2em] mt-1.5 flex items-center gap-2">
-              <ShieldCheck className="w-3.5 h-3.5 text-indigo-500" />
-              Elite Dashboard • {manager.name}
-            </p>
-          </div>
-          <div className="flex items-center gap-3">
-            <div className="glass-card px-4 py-2 rounded-xl flex items-center gap-3 border-white/5">
-              <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-              <span className="text-xs font-bold text-slate-400">{new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</span>
-            </div>
+      <main className={cn(
+        "flex-1 p-6 lg:p-10 overflow-y-auto max-h-screen custom-scrollbar transition-colors duration-500 relative",
+        theme === 'dark' 
+          ? "bg-gradient-to-br from-[#020617] via-[#020617] to-indigo-950/20" 
+          : "bg-slate-50"
+      )}>
+        {/* Sticky Header with Greeting and Tools */}
+        <div className={cn(
+          "sticky top-0 z-40 py-4 -mx-6 lg:-mx-10 px-6 lg:px-10 backdrop-blur-xl border-b transition-all shadow-2xl flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-10 print:hidden",
+          theme === 'dark' ? "bg-[#020617]/90 border-white/10 shadow-indigo-500/5" : "bg-white/90 border-slate-200 shadow-slate-200/50"
+        )}>
+          <div className="flex items-center gap-4 w-full md:w-auto">
             <button 
-              onClick={() => {
-                const csv = "Date,Buyer,Type,Challan,Recv,Order,Bill,Paid\n" + 
-                  transactions.map(t => `${t.date},${t.buyer},${t.type},${t.challan},${t.receiveQty},${t.orderQty},${t.bill},${t.paid}`).join('\n');
-                const blob = new Blob([csv], { type: 'text/csv' });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = 'ledger_report.csv';
-                a.click();
-              }}
-              className="bg-slate-800 hover:bg-slate-700 text-white p-2.5 rounded-xl border border-white/5 transition-all"
-              title="Export Full Ledger"
+              onClick={() => setIsSidebarOpen(true)}
+              className={cn(
+                "p-3 border rounded-2xl lg:hidden transition-all",
+                theme === 'dark' ? "bg-slate-900/50 border-white/5 text-slate-400 hover:text-white" : "bg-slate-100 border-slate-200 text-slate-500 hover:text-slate-900"
+              )}
             >
-              <Download className="w-5 h-5" />
+              <Menu className="w-6 h-6" />
             </button>
+            <div>
+              <h2 className={cn("text-lg md:text-xl font-black tracking-tight", theme === 'dark' ? "text-white" : "text-slate-900")}>Assalamu Alaikom</h2>
+              <p className="text-slate-500 text-[10px] md:text-[10px] font-bold uppercase tracking-[0.2em] mt-0.5 flex items-center gap-2">
+                <ShieldCheck className="w-3 h-3 text-indigo-500" />
+                Elite Dashboard • {manager.name}
+              </p>
+            </div>
           </div>
-        </header>
 
-        {/* Stats Grid */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-6 mb-10 print:hidden">
-          <StatCard label="Total Received" value={`${stats.received.toLocaleString()}`} unit="Yds" icon={<ArrowDownCircle className="w-5 h-5" />} color="blue" />
-          <StatCard label="Total Ordered" value={`${stats.ordered.toLocaleString()}`} unit="Yds" icon={<ArrowUpCircle className="w-5 h-5" />} color="rose" />
-          <StatCard label="Current Stock" value={`${(stats.received - stats.ordered).toLocaleString()}`} unit="Yds" icon={<Package className="w-5 h-5" />} color="emerald" />
-          <StatCard label="Total Due" value={`${(stats.bill - stats.paid).toLocaleString()}`} unit="৳" icon={<CreditCard className="w-5 h-5" />} color="amber" />
+          <div className="flex items-center gap-2 md:gap-3 w-full md:w-auto justify-between md:justify-end">
+            <div className={cn(
+              "flex items-center gap-1 p-1 rounded-xl border",
+              theme === 'dark' ? "bg-slate-900/50 border-white/5" : "bg-slate-100 border-slate-200"
+            )}>
+              <button 
+                onClick={() => {
+                  const entrySection = document.getElementById('new-entry-section');
+                  entrySection?.scrollIntoView({ behavior: 'smooth' });
+                }}
+                className="p-2 text-indigo-400 hover:text-white hover:bg-indigo-500/20 rounded-lg transition-all"
+                title="New Entry"
+              >
+                <Plus className="w-4 h-4" />
+              </button>
+              <div className={cn("w-px h-4 mx-1", theme === 'dark' ? "bg-white/10" : "bg-slate-300")} />
+              <button 
+                onClick={() => setIsGlobalSearchOpen(true)}
+                className="p-2 text-slate-400 hover:text-white hover:bg-white/5 rounded-lg transition-all"
+                title="Global Search"
+              >
+                <Search className="w-4 h-4" />
+              </button>
+              <div className={cn("w-px h-4 mx-1", theme === 'dark' ? "bg-white/10" : "bg-slate-300")} />
+              <button 
+                onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+                className="p-2 text-slate-400 hover:text-white hover:bg-white/5 rounded-lg transition-all"
+                title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+              >
+                {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+              </button>
+            </div>
+            
+            <div className="flex items-center gap-2 md:gap-3">
+              <div className={cn(
+                "glass-card px-3 md:px-4 py-2 rounded-xl flex items-center gap-2 md:gap-3 border",
+                theme === 'dark' ? "border-white/5" : "border-slate-200 bg-slate-100"
+              )}>
+                <div className="w-1.5 h-1.5 md:w-2 md:h-2 rounded-full bg-emerald-500 animate-pulse" />
+                <span className="text-[10px] md:text-xs font-bold text-slate-400 whitespace-nowrap">{new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</span>
+              </div>
+              <button 
+                onClick={() => {
+                  const csv = "Date,Buyer,Type,Challan,Recv,Order,Bill,Paid\n" + 
+                    transactions.map(t => `${t.date},${t.buyer},${t.type},${t.challan},${t.receiveQty},${t.orderQty},${t.bill},${t.paid}`).join('\n');
+                  const blob = new Blob([csv], { type: 'text/csv' });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement('a');
+                  a.href = url;
+                  a.download = 'ledger_report.csv';
+                  a.click();
+                }}
+                className={cn(
+                  "p-2 md:p-2.5 rounded-xl border transition-all",
+                  theme === 'dark' ? "bg-slate-800 hover:bg-slate-700 text-white border-white/5" : "bg-slate-100 hover:bg-slate-200 text-slate-900 border-slate-200"
+                )}
+                title="Export Full Ledger"
+              >
+                <Download className="w-4 h-4 md:w-5 md:h-5" />
+              </button>
+            </div>
+          </div>
         </div>
 
-        {/* Due Summary Section */}
-        {Object.keys(buyerDues).length > 0 && (
-          <div id="dues-section" className="mb-8 print:hidden scroll-mt-10">
-            <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4 flex items-center gap-2">
-              <CreditCard className="w-4 h-4 text-rose-500" />
-              Outstanding Dues Summary
-            </h3>
-            <div className="flex flex-wrap gap-3">
-              {Object.entries(buyerDues).map(([buyer, due]) => (
-                <motion.div 
-                  initial={{ opacity: 0, scale: 0.9 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  key={buyer} 
-                  className="glass-card px-4 py-3 rounded-2xl border-l-4 border-l-rose-500 flex flex-col cursor-pointer hover:bg-slate-800 transition-colors"
-                  onClick={() => setSelectedStatementBuyer(buyer)}
+        {/* Stats Grid */}
+        <div className="grid grid-cols-2 xl:grid-cols-4 gap-3 md:gap-6 mb-10 print:hidden">
+          <StatCard label="Total Received" value={`${stats.received.toLocaleString()}`} unit="Yds" icon={<ArrowDownCircle className="w-5 h-5" />} color="blue" theme={theme} />
+          <StatCard label="Total Ordered" value={`${stats.ordered.toLocaleString()}`} unit="Yds" icon={<ArrowUpCircle className="w-5 h-5" />} color="amber" theme={theme} />
+          <StatCard label="Current Stock" value={`${(stats.received - stats.ordered).toLocaleString()}`} unit="Yds" icon={<Package className="w-5 h-5" />} color="blue" theme={theme} />
+          <StatCard 
+            label={stats.bill - stats.paid >= 0 ? "Total Due" : "Total Advance"} 
+            value={`${Math.abs(stats.bill - stats.paid).toLocaleString()}`} 
+            unit="৳" 
+            icon={<CreditCard className="w-5 h-5" />} 
+            color={stats.bill - stats.paid > 0 ? "rose" : (stats.bill - stats.paid < 0 ? "emerald" : "blue")} 
+            theme={theme} 
+          />
+        </div>
+
+        {/* Pending Grey Stock Summary */}
+        {topPendingGrey.length > 0 && (
+          <div className="mb-8 print:hidden">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="p-2 bg-blue-500/10 rounded-xl border border-blue-500/20">
+                <TrendingUp className="w-4 h-4 text-blue-400" />
+              </div>
+              <div>
+                <h3 className={cn("text-base md:text-sm font-black uppercase tracking-widest", headingColor)}>Pending Grey Stock</h3>
+                <p className={cn("text-[8px] md:text-[10px] font-bold uppercase tracking-widest mt-0.5", mutedText)}>Fabric remaining for processing</p>
+              </div>
+            </div>
+            {/* Desktop Grid View */}
+            <div className="hidden md:grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
+              {topPendingGrey.slice(0, 8).map((item, idx) => (
+                <div 
+                  key={idx} 
+                  className={cn(
+                    "glass-card p-5 rounded-3xl border transition-all hover:scale-[1.02] cursor-pointer group relative",
+                    theme === 'dark' ? "bg-slate-900/40 border-white/5" : "bg-white border-slate-200 shadow-sm",
+                    item.isRunning && (theme === 'dark' ? "border-emerald-500/40 bg-emerald-500/[0.03]" : "border-emerald-300 bg-emerald-50")
+                  )}
+                  onClick={() => {
+                    setFilterBuyer(item.buyer);
+                    document.getElementById('ledger-section')?.scrollIntoView({ behavior: 'smooth' });
+                  }}
                 >
-                  <span className="text-[10px] font-bold text-slate-500 uppercase">{buyer}</span>
-                  <span className="text-sm font-black text-rose-400">৳ {due.toLocaleString()}</span>
-                </motion.div>
+                  <div className="flex justify-between items-start mb-3">
+                    <div className="flex flex-col gap-1">
+                      <p className={cn("text-xs font-black uppercase tracking-[0.15em] truncate max-w-[140px]", mutedText)}>{item.buyer}</p>
+                      {item.isRunning && (
+                        <span className="text-[10px] font-black text-emerald-500 uppercase tracking-wider flex items-center gap-1.5">
+                          <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                          Program Running
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <input 
+                        type="checkbox" 
+                        checked={item.isRunning}
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={(e) => {
+                          e.stopPropagation();
+                          const key = `${item.buyer}|${item.fabric}`;
+                          const updated = { ...runningPrograms, [key]: e.target.checked };
+                          setRunningPrograms(updated);
+                          saveData(transactions, manager, notes, updated);
+                        }}
+                        className="w-5 h-5 rounded-lg border-slate-700 bg-slate-800 text-emerald-500 focus:ring-emerald-500/20 cursor-pointer"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="mb-4">
+                    <h4 className={cn("text-base font-black tracking-tight truncate mb-1", headingColor)}>{item.fabric}</h4>
+                    <span className={cn("text-sm font-black", item.isRunning ? "text-emerald-400" : "text-blue-400")}>
+                      {item.balance.toLocaleString()} <span className="text-[10px] uppercase opacity-60">Yds Remaining</span>
+                    </span>
+                  </div>
+
+                  <div className="mt-4 w-full h-2 bg-slate-800/50 rounded-full overflow-hidden border border-white/5">
+                    <div 
+                      className={cn("h-full rounded-full transition-all duration-1000", item.isRunning ? "bg-gradient-to-r from-emerald-600 to-emerald-400" : "bg-gradient-to-r from-blue-600 to-blue-400")}
+                      style={{ width: `${Math.min(100, (item.ordered / item.received) * 100)}%` }}
+                    />
+                  </div>
+
+                  <div className="flex justify-between mt-3 pt-3 border-t border-white/5">
+                    <div className="flex flex-col">
+                      <span className="text-[9px] font-bold text-slate-500 uppercase tracking-tighter">Processed</span>
+                      <span className={cn("text-xs font-black", headingColor)}>{Math.round((item.ordered / item.received) * 100)}%</span>
+                    </div>
+                    <div className="flex flex-col items-end">
+                      <span className="text-[9px] font-bold text-slate-500 uppercase tracking-tighter">Total Stock</span>
+                      <span className={cn("text-xs font-black", headingColor)}>{item.received.toLocaleString()}</span>
+                    </div>
+                  </div>
+                </div>
               ))}
+            </div>
+
+            {/* Mobile Zebra View */}
+            <div className="md:hidden glass-card rounded-3xl overflow-hidden border border-white/5">
+              <div className="divide-y divide-white/5">
+                {topPendingGrey.slice(0, 12).map((item, idx) => (
+                  <div 
+                    key={idx}
+                    className={cn(
+                      "p-4 flex items-center justify-between gap-3 transition-all active:bg-indigo-500/10",
+                      idx % 2 === 0 ? (theme === 'dark' ? "bg-slate-800/20" : "bg-slate-50/50") : "bg-transparent",
+                      item.isRunning && (theme === 'dark' ? "bg-emerald-500/[0.05] border-l-4 border-l-emerald-500" : "bg-emerald-50 border-l-4 border-l-emerald-500")
+                    )}
+                    onClick={() => {
+                      setFilterBuyer(item.buyer);
+                      document.getElementById('ledger-section')?.scrollIntoView({ behavior: 'smooth' });
+                    }}
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-0.5">
+                        <p className={cn("text-[10px] font-black uppercase tracking-wider truncate", mutedText)}>{item.buyer}</p>
+                        {item.isRunning && (
+                          <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                        )}
+                      </div>
+                      <h4 className={cn("text-sm font-black tracking-tight truncate", headingColor)}>{item.fabric}</h4>
+                      <div className="flex items-center gap-2 mt-1">
+                        <div className="flex-1 h-1 bg-slate-800/50 rounded-full overflow-hidden">
+                          <div 
+                            className={cn("h-full rounded-full", item.isRunning ? "bg-emerald-500" : "bg-blue-500")}
+                            style={{ width: `${Math.min(100, (item.ordered / item.received) * 100)}%` }}
+                          />
+                        </div>
+                        <span className="text-[9px] font-bold text-slate-500">{Math.round((item.ordered / item.received) * 100)}%</span>
+                      </div>
+                    </div>
+                    
+                    <div className="flex flex-col items-end gap-2">
+                      <div className="flex items-center gap-3">
+                        <div className="text-right">
+                          <p className={cn("text-xs font-black", item.isRunning ? "text-emerald-400" : "text-blue-400")}>{item.balance.toLocaleString()}</p>
+                          <p className="text-[8px] font-bold text-slate-500 uppercase tracking-tighter">Rem. Yds</p>
+                        </div>
+                        <input 
+                          type="checkbox" 
+                          checked={item.isRunning}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={(e) => {
+                            e.stopPropagation();
+                            const key = `${item.buyer}|${item.fabric}`;
+                            const updated = { ...runningPrograms, [key]: e.target.checked };
+                            setRunningPrograms(updated);
+                            saveData(transactions, manager, notes, updated);
+                          }}
+                          className="w-5 h-5 rounded-lg border-slate-700 bg-slate-800 text-emerald-500 focus:ring-emerald-500/20"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Financial Summary Section (Dues & Advances) */}
+        {(Object.keys(buyerDues).length > 0 || Object.keys(buyerAdvances).length > 0) && (
+          <div id="dues-section" className="mb-8 print:hidden scroll-mt-10">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* Dues */}
+              {Object.keys(buyerDues).length > 0 && (
+                <div>
+                  <h3 className="text-sm md:text-xs font-bold text-slate-500 uppercase tracking-widest mb-4 flex items-center gap-2">
+                    <CreditCard className="w-4 h-4 text-rose-500" />
+                    Outstanding Dues
+                  </h3>
+                  <div className="flex flex-wrap gap-3">
+                    {Object.entries(buyerDues).map(([buyer, due]) => (
+                      <motion.div 
+                        initial={{ opacity: 0, scale: 0.9 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        key={buyer} 
+                        className={cn(
+                          "glass-card px-4 py-3 rounded-2xl border-l-4 border-l-rose-500 flex flex-col cursor-pointer transition-all",
+                          theme === 'dark' ? "hover:bg-slate-800" : "hover:bg-slate-100"
+                        )}
+                        onClick={() => setSelectedStatementBuyer(buyer)}
+                      >
+                        <span className="text-[10px] font-bold text-slate-500 uppercase">{buyer}</span>
+                        <span className="text-sm font-black text-rose-400">৳ {due.toLocaleString()}</span>
+                      </motion.div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Advances */}
+              {Object.keys(buyerAdvances).length > 0 && (
+                <div>
+                  <h3 className="text-sm md:text-xs font-bold text-slate-500 uppercase tracking-widest mb-4 flex items-center gap-2">
+                    <Banknote className="w-4 h-4 text-emerald-500" />
+                    Advance Payments
+                  </h3>
+                  <div className="flex flex-wrap gap-3">
+                    {Object.entries(buyerAdvances).map(([buyer, advance]) => (
+                      <motion.div 
+                        initial={{ opacity: 0, scale: 0.9 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        key={buyer} 
+                        className={cn(
+                          "glass-card px-4 py-3 rounded-2xl border-l-4 border-l-emerald-500 flex flex-col cursor-pointer transition-all",
+                          theme === 'dark' ? "hover:bg-slate-800" : "hover:bg-slate-100"
+                        )}
+                        onClick={() => setSelectedStatementBuyer(buyer)}
+                      >
+                        <span className="text-[10px] font-bold text-slate-500 uppercase">{buyer}</span>
+                        <span className="text-sm font-black text-emerald-400">৳ {advance.toLocaleString()}</span>
+                      </motion.div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -786,15 +1318,19 @@ export default function App() {
                 <FileText className="w-5 h-5 text-emerald-400" />
               </div>
               <div>
-                <h3 className="text-lg font-bold">Buyer Statement</h3>
-                <p className="text-xs text-slate-500">View and export detailed history for a specific buyer</p>
+                <h3 className="text-xl md:text-lg font-bold">Buyer Statement</h3>
+                <p className="text-[10px] md:text-xs text-slate-500">View and export detailed history for a specific buyer</p>
               </div>
             </div>
             <div className="flex items-center gap-2 w-full sm:w-auto">
               <select 
                 value={selectedStatementBuyer}
                 onChange={(e) => setSelectedStatementBuyer(e.target.value)}
-                className="bg-slate-800 border-none rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-indigo-500 w-full sm:w-64"
+                className={cn(
+                  "border-none rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-indigo-500 w-full sm:w-64",
+                  inputBg,
+                  theme === 'dark' ? "text-white" : "text-slate-900"
+                )}
               >
                 <option value="">Select a Buyer</option>
                 {uniqueBuyers.map(buyer => (
@@ -812,24 +1348,31 @@ export default function App() {
         <AnimatePresence>
           {selectedStatementBuyer && (
             <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }} className="mb-8 space-y-6">
-              <div className="glass-card p-8 rounded-3xl relative overflow-hidden print:bg-white print:text-black print:border-none print:shadow-none">
-                <div className="hidden print:block mb-8 border-b-2 border-slate-200 pb-6">
-                  <div className="flex justify-between items-start">
-                    <div>
-                      <h1 className="text-3xl font-black uppercase tracking-tighter">inventory & Billing soft</h1>
-                      <p className="text-sm text-slate-600">Generated on: {new Date().toLocaleDateString()}</p>
+              <div className="glass-card p-8 rounded-3xl relative overflow-hidden print:bg-white print:text-black print:border-none print:shadow-none print:p-0">
+                {/* PDF/Print Header with Logo */}
+                <div className="hidden print:block mb-10 border-b-4 border-indigo-600 pb-8">
+                  <div className="flex justify-between items-center">
+                    <div className="flex items-center gap-4">
+                      <div className="w-16 h-16 bg-indigo-600 rounded-2xl flex items-center justify-center text-white shadow-xl">
+                        <Factory className="w-10 h-10" />
+                      </div>
+                      <div>
+                        <h1 className="text-4xl font-black uppercase tracking-tighter text-indigo-950">PRO FABRIC ELITE</h1>
+                        <p className="text-xs font-bold text-slate-500 uppercase tracking-[0.3em]">Inventory & Billing Solutions</p>
+                      </div>
                     </div>
                     <div className="text-right">
-                      <h2 className="text-xl font-bold">{manager.name}</h2>
-                      <p className="text-xs text-slate-500">System Manager</p>
+                      <p className="text-sm font-bold text-indigo-600 uppercase tracking-widest mb-1">Statement Summary</p>
+                      <p className="text-xs text-slate-500 font-mono">Date: {new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}</p>
+                      <p className="text-xs text-slate-500 font-mono">Time: {new Date().toLocaleTimeString()}</p>
                     </div>
                   </div>
                 </div>
 
-                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-8 print:mb-6">
+                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-8 print:mb-10">
                   <div>
-                    <p className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-1 print:text-slate-600">Statement For</p>
-                    <h2 className="text-4xl font-black tracking-tighter print:text-black">{selectedStatementBuyer}</h2>
+                    <p className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-1 print:text-indigo-600 print:mb-2">Statement For Client</p>
+                    <h2 className="text-4xl font-black tracking-tighter print:text-5xl print:text-indigo-950">{selectedStatementBuyer}</h2>
                   </div>
                   <div className="flex gap-2 print:hidden">
                     <button onClick={() => exportBuyerCSV(selectedStatementBuyer)} className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-white px-4 py-2 rounded-xl text-xs font-bold transition-all border border-white/5">
@@ -844,22 +1387,26 @@ export default function App() {
                 {(() => {
                   const { summary } = getBuyerStatementData(selectedStatementBuyer);
                   return (
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-8 print:grid-cols-4 print:gap-2">
-                      <div className="bg-slate-800/50 p-4 rounded-2xl print:bg-slate-100 print:border print:border-slate-200">
-                        <p className="text-[11px] font-bold text-slate-500 uppercase tracking-widest mb-1">Received</p>
-                        <p className="text-xl font-black print:text-black">{summary.received.toLocaleString()} Yds</p>
+                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-4 mb-8 print:grid-cols-5 print:gap-4 print:mb-12">
+                      <div className="bg-slate-800/50 p-4 rounded-2xl print:bg-white print:border-2 print:border-slate-100 print:shadow-sm">
+                        <p className="text-[11px] font-bold text-slate-500 uppercase tracking-widest mb-1 print:text-indigo-600">Received</p>
+                        <p className="text-xl font-black print:text-2xl print:text-indigo-950">{summary.received.toLocaleString()} Yds</p>
                       </div>
-                      <div className="bg-slate-800/50 p-4 rounded-2xl print:bg-slate-100 print:border print:border-slate-200">
-                        <p className="text-[11px] font-bold text-slate-500 uppercase tracking-widest mb-1">Delivered</p>
-                        <p className="text-xl font-black print:text-black">{summary.ordered.toLocaleString()} Yds</p>
+                      <div className="bg-slate-800/50 p-4 rounded-2xl print:bg-white print:border-2 print:border-slate-100 print:shadow-sm">
+                        <p className="text-[11px] font-bold text-slate-500 uppercase tracking-widest mb-1 print:text-indigo-600">Ordered</p>
+                        <p className="text-xl font-black print:text-2xl print:text-indigo-950">{summary.ordered.toLocaleString()} Yds</p>
                       </div>
-                      <div className="bg-slate-800/50 p-4 rounded-2xl print:bg-slate-100 print:border print:border-slate-200">
-                        <p className="text-[11px] font-bold text-slate-500 uppercase tracking-widest mb-1">Total Bill</p>
-                        <p className="text-xl font-black print:text-black">৳ {summary.bill.toLocaleString()}</p>
+                      <div className="bg-slate-800/50 p-4 rounded-2xl print:bg-white print:border-2 print:border-indigo-50 print:shadow-sm">
+                        <p className="text-[11px] font-bold text-slate-500 uppercase tracking-widest mb-1 print:text-indigo-600">Actual Delv.</p>
+                        <p className="text-xl font-black print:text-2xl print:text-indigo-950">{(summary.actualDelivered).toLocaleString()} Yds</p>
                       </div>
-                      <div className="bg-slate-800/50 p-4 rounded-2xl print:bg-slate-100 print:border print:border-slate-200">
-                        <p className="text-[11px] font-bold text-slate-500 uppercase tracking-widest mb-1">Balance Due</p>
-                        <p className={cn("text-xl font-black", summary.bill - summary.paid > 0 ? "text-rose-400 print:text-rose-600" : "text-emerald-400 print:text-emerald-600")}>
+                      <div className="bg-slate-800/50 p-4 rounded-2xl print:bg-white print:border-2 print:border-slate-100 print:shadow-sm">
+                        <p className="text-[11px] font-bold text-slate-500 uppercase tracking-widest mb-1 print:text-indigo-600">Total Bill</p>
+                        <p className="text-xl font-black print:text-2xl print:text-indigo-950">৳ {summary.bill.toLocaleString()}</p>
+                      </div>
+                      <div className="bg-slate-800/50 p-4 rounded-2xl print:bg-white print:border-2 print:border-rose-50 print:shadow-sm">
+                        <p className="text-[11px] font-bold text-slate-500 uppercase tracking-widest mb-1 print:text-rose-600">Balance Due</p>
+                        <p className={cn("text-xl font-black print:text-2xl", summary.bill - summary.paid > 0 ? "text-rose-400 print:text-rose-600" : "text-emerald-400 print:text-emerald-600")}>
                           ৳ {(summary.bill - summary.paid).toLocaleString()}
                         </p>
                       </div>
@@ -870,55 +1417,89 @@ export default function App() {
                 <div className="overflow-x-auto print:overflow-visible">
                   <table className="w-full text-left border-collapse">
                     <thead>
-                      <tr className="bg-slate-800/30 text-[11px] font-bold text-slate-400 uppercase tracking-widest print:bg-slate-100 print:text-slate-600">
-                        <th className="px-4 py-3">Date</th>
-                        <th className="px-4 py-3">Type</th>
-                        <th className="px-4 py-3">Fabric / Category</th>
-                        <th className="px-4 py-3">Ref</th>
-                        <th className="px-4 py-3 text-right">Recv</th>
-                        <th className="px-4 py-3 text-right">Order</th>
-                        <th className="px-4 py-3 text-right">Bill</th>
-                        <th className="px-4 py-3 text-right">Paid</th>
+                      <tr className="bg-slate-800/30 text-[11px] font-bold text-slate-400 uppercase tracking-widest print:bg-indigo-600 print:text-white">
+                        <th className="px-4 py-4 print:rounded-l-xl">Date</th>
+                        <th className="px-4 py-4">Type</th>
+                        <th className="px-4 py-4">Fabric / Category</th>
+                        <th className="px-4 py-4">Ref</th>
+                        <th className="px-4 py-4 text-right">Recv</th>
+                        <th className="px-4 py-4 text-right">Order</th>
+                        <th className="px-4 py-4 text-right">Actual Delv</th>
+                        <th className="px-4 py-4 text-right">Bill</th>
+                        <th className="px-4 py-4 text-right print:rounded-r-xl">Paid</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-white/5 print:divide-slate-200">
-                      {getBuyerStatementData(selectedStatementBuyer).transactions.map(t => (
-                        <tr key={t.id} className="text-xs print:text-black">
-                          <td className="px-4 py-3 font-mono">{t.date}</td>
-                          <td className="px-4 py-3 capitalize">{t.type}</td>
-                          <td className="px-4 py-3">
+                      {getBuyerStatementData(selectedStatementBuyer).transactions.map((t, idx) => (
+                        <tr key={t.id} className={cn(
+                          "text-xs transition-colors",
+                          idx % 2 === 0 ? "bg-white/[0.02] print:bg-slate-50/50" : "bg-transparent print:bg-white",
+                          "print:text-indigo-950"
+                        )}>
+                          <td className="px-4 py-4 font-mono">{t.date}</td>
+                          <td className="px-4 py-4">
+                            <span className={cn(
+                              "px-2 py-1 rounded-full text-[10px] font-bold uppercase",
+                              t.type === 'receive' ? "bg-blue-500/10 text-blue-400 print:text-blue-600" : 
+                              t.type === 'delivery' ? "bg-indigo-500/10 text-indigo-400 print:text-indigo-600" : 
+                              "bg-emerald-500/10 text-emerald-400 print:text-emerald-600"
+                            )}>
+                              {t.type}
+                            </span>
+                          </td>
+                          <td className="px-4 py-4">
                             <div className="flex flex-col">
-                              <span className="font-bold text-emerald-400 print:text-emerald-700">{t.fabricName}</span>
+                              <span className="font-bold text-slate-200 print:text-indigo-950">{t.fabricName}</span>
                               <span className="text-[9px] text-slate-500 uppercase">{t.pkgType}</span>
                             </div>
                           </td>
-                          <td className="px-4 py-3 text-slate-400 print:text-slate-600">{t.challan}</td>
-                          <td className="px-4 py-3 text-right text-blue-400 print:text-blue-600">{t.receiveQty > 0 ? t.receiveQty : '-'}</td>
-                          <td className="px-4 py-3 text-right text-rose-400 print:text-rose-600">{t.orderQty > 0 ? t.orderQty : '-'}</td>
-                          <td className="px-4 py-3 text-right font-bold">৳ {t.bill > 0 ? t.bill.toLocaleString() : '-'}</td>
-                          <td className="px-4 py-3 text-right text-emerald-400 print:text-emerald-600">৳ {t.paid > 0 ? t.paid.toLocaleString() : '-'}</td>
+                          <td className="px-4 py-4 text-slate-400 print:text-slate-600">{t.challan}</td>
+                          <td className="px-4 py-4 text-right font-mono text-blue-400 print:text-blue-600">{t.receiveQty > 0 ? t.receiveQty.toLocaleString() : '-'}</td>
+                          <td className="px-4 py-4 text-right font-mono text-indigo-400 print:text-indigo-600">{t.orderQty > 0 ? t.orderQty.toLocaleString() : '-'}</td>
+                          <td className="px-4 py-4 text-right font-mono text-indigo-400 print:text-indigo-800 font-bold">{(t.delvA + t.delvB) > 0 ? (t.delvA + t.delvB).toLocaleString() : '-'}</td>
+                          <td className="px-4 py-4 text-right font-mono text-slate-200 print:text-indigo-950">৳ {t.bill.toLocaleString()}</td>
+                          <td className="px-4 py-4 text-right font-mono text-emerald-400 print:text-emerald-600">৳ {t.paid.toLocaleString()}</td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
+                </div>
+
+                {/* Print Footer */}
+                <div className="hidden print:flex justify-between items-end mt-20 pt-10 border-t border-slate-200">
+                  <div className="space-y-4">
+                    <div className="w-40 h-px bg-slate-400" />
+                    <p className="text-xs font-bold text-slate-600 uppercase tracking-widest">Client Signature</p>
+                  </div>
+                  <div className="text-center">
+                    <p className="text-[10px] text-slate-400 italic mb-2">This is a computer generated statement</p>
+                    <div className="flex items-center gap-2 justify-center">
+                      <div className="w-2 h-2 rounded-full bg-indigo-600" />
+                      <p className="text-xs font-black text-indigo-950">PRO FABRIC ELITE</p>
+                    </div>
+                  </div>
+                  <div className="space-y-4">
+                    <div className="w-40 h-px bg-slate-400" />
+                    <p className="text-xs font-bold text-slate-600 uppercase tracking-widest">Authorized Signature</p>
+                  </div>
                 </div>
               </div>
             </motion.div>
           )}
         </AnimatePresence>
 
-        <div className="grid grid-cols-1 xl:grid-cols-12 gap-8 mb-8 print:hidden">
+        <div className="grid grid-cols-1 xl:grid-cols-12 gap-8 mb-8 print:hidden" id="new-entry-section">
           <div className="xl:col-span-5 glass-card p-6 rounded-3xl">
-            <h3 className="text-lg font-bold mb-6 flex items-center gap-2"><PlusCircle className="w-5 h-5 text-indigo-500" /> {editingId ? 'Edit Entry' : 'New Transaction'}</h3>
+            <h3 className="text-xl md:text-lg font-bold mb-6 flex items-center gap-2"><PlusCircle className="w-5 h-5 text-indigo-500" /> {editingId ? 'Edit Entry' : 'New Transaction'}</h3>
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1.5">
-                  <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">Date</label>
-                  <input type="date" value={formData.date} onChange={e => setFormData(prev => ({ ...prev, date: e.target.value }))} className="w-full bg-slate-800 border-none rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-indigo-500" />
+                  <label className={cn("text-[11px] font-bold uppercase tracking-wide", mutedText)}>Date</label>
+                  <input type="date" value={formData.date} onChange={e => setFormData(prev => ({ ...prev, date: e.target.value }))} className={cn("w-full border-none rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-indigo-500", inputBg, theme === 'dark' ? "text-white" : "text-slate-900")} />
                 </div>
                 <div className="space-y-1.5">
-                  <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">Category</label>
-                  <select value={formData.pkgType} onChange={e => setFormData(prev => ({ ...prev, pkgType: e.target.value as any }))} className="w-full bg-slate-800 border-none rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-indigo-500">
+                  <label className={cn("text-[11px] font-bold uppercase tracking-wide", mutedText)}>Category</label>
+                  <select value={formData.pkgType} onChange={e => setFormData(prev => ({ ...prev, pkgType: e.target.value as any }))} className={cn("w-full border-none rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-indigo-500", inputBg, theme === 'dark' ? "text-white" : "text-slate-900")}>
                     <option value="Non-Package">Non-Package</option>
                     <option value="Package">Package</option>
                   </select>
@@ -927,24 +1508,28 @@ export default function App() {
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1.5">
                   <div className="flex justify-between items-center">
-                    <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">Buyer Name</label>
-                    {formData.buyer && buyerDues[formData.buyer] !== undefined && <span className="text-[9px] font-bold text-rose-400 animate-pulse">Due: ৳ {buyerDues[formData.buyer].toLocaleString()}</span>}
+                    <label className={cn("text-[11px] font-bold uppercase tracking-wide", mutedText)}>Buyer Name</label>
+                    {formData.buyer && buyerBalances[formData.buyer] !== undefined && Math.abs(buyerBalances[formData.buyer]) > 0.01 && (
+                      <span className={cn("text-[9px] font-bold animate-pulse", buyerBalances[formData.buyer] > 0 ? "text-rose-400" : "text-emerald-400")}>
+                        {buyerBalances[formData.buyer] > 0 ? "Due: ৳ " : "Adv: ৳ "}{Math.abs(buyerBalances[formData.buyer]).toLocaleString()}
+                      </span>
+                    )}
                   </div>
-                  <input type="text" required list="buyer-suggestions" placeholder="Enter Name" value={formData.buyer} onChange={e => setFormData(prev => ({ ...prev, buyer: e.target.value }))} className="w-full bg-slate-800 border-none rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-indigo-500" />
+                  <input type="text" required list="buyer-suggestions" placeholder="Enter Name" value={formData.buyer} onChange={e => setFormData(prev => ({ ...prev, buyer: e.target.value }))} className={cn("w-full border-none rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-indigo-500", inputBg, theme === 'dark' ? "text-white" : "text-slate-900")} />
                   <datalist id="buyer-suggestions">{uniqueBuyers.map(buyer => <option key={buyer} value={buyer} />)}</datalist>
                 </div>
                 <div className="space-y-1.5">
-                  <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">Fabric Name</label>
-                  <input type="text" list="fabric-suggestions" placeholder="e.g. Cotton" value={formData.fabricName} onChange={e => setFormData(prev => ({ ...prev, fabricName: e.target.value }))} className="w-full bg-slate-800 border-none rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-indigo-500" />
+                  <label className={cn("text-[11px] font-bold uppercase tracking-wide", mutedText)}>Fabric Name</label>
+                  <input type="text" list="fabric-suggestions" placeholder="e.g. Cotton" value={formData.fabricName} onChange={e => setFormData(prev => ({ ...prev, fabricName: e.target.value }))} className={cn("w-full border-none rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-indigo-500", inputBg, theme === 'dark' ? "text-white" : "text-slate-900")} />
                   <datalist id="fabric-suggestions">{uniqueFabrics.map(fabric => <option key={fabric} value={fabric} />)}</datalist>
                 </div>
               </div>
               <div className="space-y-1.5">
-                <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">Challan / Ref</label>
-                <input type="text" placeholder="Ref No" value={formData.challan} onChange={e => setFormData(prev => ({ ...prev, challan: e.target.value }))} className="w-full bg-slate-800 border-none rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-indigo-500" />
+                <label className={cn("text-[11px] font-bold uppercase tracking-wide", mutedText)}>Challan / Ref</label>
+                <input type="text" placeholder="Ref No" value={formData.challan} onChange={e => setFormData(prev => ({ ...prev, challan: e.target.value }))} className={cn("w-full border-none rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-indigo-500", inputBg, theme === 'dark' ? "text-white" : "text-slate-900")} />
               </div>
               <div className="space-y-1.5">
-                <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">Entry Type</label>
+                <label className={cn("text-[11px] font-bold uppercase tracking-wide", mutedText)}>Entry Type</label>
                 <div className="grid grid-cols-3 gap-2">
                   {(['receive', 'delivery', 'bill'] as const).map(type => {
                     const Icon = type === 'receive' ? Inbox : type === 'delivery' ? Truck : Banknote;
@@ -956,7 +1541,7 @@ export default function App() {
                         onClick={() => setFormData(prev => ({ ...prev, type }))} 
                         className={cn(
                           "py-2.5 rounded-xl text-[10px] font-bold capitalize transition-all border flex flex-col items-center gap-1", 
-                          formData.type === type ? `${activeColor} text-white shadow-lg` : "bg-slate-800 border-transparent text-slate-400 hover:bg-slate-700"
+                          formData.type === type ? `${activeColor} text-white shadow-lg` : cn(inputBg, "border-transparent text-slate-400 hover:bg-slate-700")
                         )}
                       >
                         <Icon className="w-4 h-4" />
@@ -974,8 +1559,8 @@ export default function App() {
                       <span className="text-xs font-bold uppercase tracking-wider">Grey Fabric Receive</span>
                     </div>
                     <div className="space-y-1.5">
-                      <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">Quantity Received (Yds)</label>
-                      <input type="number" placeholder="0.00" value={formData.amount} onChange={e => setFormData(prev => ({ ...prev, amount: e.target.value }))} className="w-full bg-slate-900 border-none rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-blue-500 font-mono" />
+                      <label className={cn("text-[11px] font-bold uppercase tracking-wide", mutedText)}>Quantity Received (Yds)</label>
+                      <input type="number" placeholder="0.00" value={formData.amount} onChange={e => setFormData(prev => ({ ...prev, amount: e.target.value }))} className={cn("w-full border-none rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-blue-500 font-mono", inputBgDeep, theme === 'dark' ? "text-white" : "text-slate-900")} />
                     </div>
                   </motion.div>
                 )}
@@ -992,21 +1577,21 @@ export default function App() {
                     </div>
                     <div className="space-y-1.5">
                       <label className="text-[11px] font-bold text-indigo-400 uppercase tracking-wide">Order Quantity (Stock Minus)</label>
-                      <input type="number" placeholder="0.00" value={formData.orderQty} onChange={e => setFormData(prev => ({ ...prev, orderQty: e.target.value }))} className="w-full bg-slate-900 border-none rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-indigo-500 font-mono" />
+                      <input type="number" placeholder="0.00" value={formData.orderQty} onChange={e => setFormData(prev => ({ ...prev, orderQty: e.target.value }))} className={cn("w-full border-none rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-indigo-500 font-mono", inputBgDeep, theme === 'dark' ? "text-white" : "text-slate-900")} />
                     </div>
                     <div className="grid grid-cols-2 gap-4">
                       <div className="space-y-1.5">
-                        <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">A Grade Delv.</label>
-                        <input type="number" placeholder="0" value={formData.delvA} onChange={e => setFormData(prev => ({ ...prev, delvA: e.target.value }))} className="w-full bg-slate-900 border-none rounded-xl px-4 py-2 text-sm font-mono" />
+                        <label className={cn("text-[11px] font-bold uppercase tracking-wide", mutedText)}>A Grade Delv.</label>
+                        <input type="number" placeholder="0" value={formData.delvA} onChange={e => setFormData(prev => ({ ...prev, delvA: e.target.value }))} className={cn("w-full border-none rounded-xl px-4 py-2 text-sm font-mono", inputBgDeep, theme === 'dark' ? "text-white" : "text-slate-900")} />
                       </div>
                       <div className="space-y-1.5">
-                        <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">B Grade Delv.</label>
-                        <input type="number" placeholder="0" value={formData.delvB} onChange={e => setFormData(prev => ({ ...prev, delvB: e.target.value }))} className="w-full bg-slate-900 border-none rounded-xl px-4 py-2 text-sm font-mono" />
+                        <label className={cn("text-[11px] font-bold uppercase tracking-wide", mutedText)}>B Grade Delv.</label>
+                        <input type="number" placeholder="0" value={formData.delvB} onChange={e => setFormData(prev => ({ ...prev, delvB: e.target.value }))} className={cn("w-full border-none rounded-xl px-4 py-2 text-sm font-mono", inputBgDeep, theme === 'dark' ? "text-white" : "text-slate-900")} />
                       </div>
                     </div>
                     <div className="grid grid-cols-2 gap-4">
                       <div className="space-y-1.5">
-                        <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">Price A (৳)</label>
+                        <label className={cn("text-[11px] font-bold uppercase tracking-wide", mutedText)}>Price A (৳)</label>
                         <input 
                           type="number" 
                           placeholder="0.00"
@@ -1018,15 +1603,15 @@ export default function App() {
                               paidInputRef.current?.focus();
                             }
                           }}
-                          className="w-full bg-slate-900 border-none rounded-xl px-4 py-2 text-sm font-mono" 
+                          className={cn("w-full border-none rounded-xl px-4 py-2 text-sm font-mono", inputBgDeep, theme === 'dark' ? "text-white" : "text-slate-900")} 
                         />
                       </div>
                       <div className="space-y-1.5">
                         <div className="flex justify-between items-center">
-                          <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">Total Bill</label>
+                          <label className={cn("text-[11px] font-bold uppercase tracking-wide", mutedText)}>Total Bill</label>
                           <span className="text-[8px] text-slate-500 uppercase font-bold italic">B-Grade = 50% Price</span>
                         </div>
-                        <div className="w-full bg-slate-900 rounded-xl px-4 py-2 text-sm font-bold text-indigo-400 border border-indigo-500/30 shadow-inner shadow-indigo-500/10">৳ {calculateBilling().toLocaleString()}</div>
+                        <div className={cn("w-full rounded-xl px-4 py-2 text-sm font-bold text-indigo-400 border shadow-inner", inputBgDeep, theme === 'dark' ? "border-indigo-500/30 shadow-indigo-500/10" : "border-indigo-200 shadow-indigo-100")}>৳ {calculateBilling().toLocaleString()}</div>
                       </div>
                     </div>
                     <div className="space-y-1.5">
@@ -1040,7 +1625,7 @@ export default function App() {
                         placeholder="0.00"
                         value={formData.paidEntry} 
                         onChange={e => setFormData(prev => ({ ...prev, paidEntry: e.target.value }))} 
-                        className="w-full bg-slate-900 border-none rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-emerald-500 font-bold text-emerald-400 font-mono" 
+                        className={cn("w-full border-none rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-emerald-500 font-bold text-emerald-400 font-mono", inputBgDeep)} 
                       />
                     </div>
                   </motion.div>
@@ -1049,21 +1634,41 @@ export default function App() {
                   <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="space-y-4 p-4 bg-emerald-600/5 rounded-2xl border border-emerald-500/20">
                     <div className="flex items-center gap-2 text-emerald-400 mb-2">
                       <Banknote className="w-4 h-4" />
-                      <span className="text-xs font-bold uppercase tracking-wider">Financial Transaction (Bill/Payment)</span>
+                      <span className="text-xs font-bold uppercase tracking-wider">Financial Transaction</span>
                     </div>
+
+                    {formData.buyer && buyerBalances[formData.buyer] !== undefined && Math.abs(buyerBalances[formData.buyer]) > 0.01 && (
+                      <div className={cn(
+                        "p-3 rounded-xl border flex justify-between items-center mb-2",
+                        buyerBalances[formData.buyer] > 0 ? "bg-rose-500/10 border-rose-500/20" : "bg-emerald-500/10 border-emerald-500/20"
+                      )}>
+                        <div className="flex flex-col">
+                          <span className={cn("text-[10px] font-bold uppercase tracking-widest", buyerBalances[formData.buyer] > 0 ? "text-rose-500" : "text-emerald-500")}>
+                            {buyerBalances[formData.buyer] > 0 ? "Outstanding Due" : "Advance Balance"}
+                          </span>
+                          <span className={cn("text-[8px] font-medium uppercase mt-0.5", buyerBalances[formData.buyer] > 0 ? "text-rose-400/60" : "text-emerald-400/60")}>
+                            Automatic Balance Detection
+                          </span>
+                        </div>
+                        <span className={cn("text-lg font-black", buyerBalances[formData.buyer] > 0 ? "text-rose-400" : "text-emerald-400")}>
+                          ৳ {Math.abs(buyerBalances[formData.buyer]).toLocaleString()}
+                        </span>
+                      </div>
+                    )}
+
                     <div className="grid grid-cols-2 gap-4">
                       <div className="space-y-1.5">
-                        <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">Total Bill (৳)</label>
-                        <input type="number" placeholder="0.00" value={formData.billEntry} onChange={e => setFormData(prev => ({ ...prev, billEntry: e.target.value }))} className="w-full bg-slate-900 border-none rounded-xl px-4 py-2.5 text-sm font-mono" />
+                        <label className={cn("text-[11px] font-bold uppercase tracking-wide", mutedText)}>New Bill (৳)</label>
+                        <input type="number" placeholder="0.00" value={formData.billEntry} onChange={e => setFormData(prev => ({ ...prev, billEntry: e.target.value }))} className={cn("w-full border-none rounded-xl px-4 py-2.5 text-sm font-mono", inputBgDeep, theme === 'dark' ? "text-white" : "text-slate-900")} />
                       </div>
                       <div className="space-y-1.5">
-                        <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">Received (৳)</label>
-                        <input type="number" placeholder="0.00" value={formData.paidEntry} onChange={e => setFormData(prev => ({ ...prev, paidEntry: e.target.value }))} className="w-full bg-slate-900 border-none rounded-xl px-4 py-2.5 text-sm font-mono" />
+                        <label className="text-[11px] font-bold text-emerald-400 uppercase tracking-wide">Paid Bill (৳)</label>
+                        <input type="number" placeholder="0.00" value={formData.paidEntry} onChange={e => setFormData(prev => ({ ...prev, paidEntry: e.target.value }))} className={cn("w-full border-none rounded-xl px-4 py-2.5 text-sm font-mono focus:ring-2 focus:ring-emerald-500", inputBgDeep, theme === 'dark' ? "text-white" : "text-slate-900")} />
                       </div>
                     </div>
-                    <div className="p-3 bg-emerald-500/10 rounded-xl border border-emerald-500/20 flex justify-between items-center">
-                      <span className="text-[11px] font-bold text-emerald-500 uppercase tracking-wide">Remaining Balance</span>
-                      <span className="text-sm font-bold text-emerald-400">৳ {((parseFloat(formData.billEntry) || 0) - (parseFloat(formData.paidEntry) || 0)).toLocaleString()}</span>
+                    <div className={cn("p-3 rounded-xl border flex justify-between items-center", theme === 'dark' ? "bg-emerald-500/10 border-emerald-500/20" : "bg-emerald-50 border-emerald-100")}>
+                      <span className={cn("text-[10px] font-bold uppercase tracking-wide", theme === 'dark' ? "text-emerald-500" : "text-emerald-600")}>Transaction Balance</span>
+                      <span className={cn("text-sm font-bold", theme === 'dark' ? "text-emerald-400" : "text-emerald-700")}>৳ {((parseFloat(formData.billEntry) || 0) - (parseFloat(formData.paidEntry) || 0)).toLocaleString()}</span>
                     </div>
                   </motion.div>
                 )}
@@ -1072,8 +1677,8 @@ export default function App() {
               {/* Financial Summary Preview */}
               {(parseFloat(formData.amount) > 0 || parseFloat(formData.orderQty) > 0 || parseFloat(formData.billEntry) > 0 || parseFloat(formData.paidEntry) > 0) && (
                 <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="p-4 bg-slate-800/50 rounded-2xl border border-slate-700/50 space-y-2">
-                  <div className="flex justify-between items-center text-[11px] font-bold text-slate-500 uppercase tracking-wider">
-                    <span>Transaction Summary</span>
+                  <div className="flex justify-between items-center text-[11px] md:text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+                    <span className="text-xs md:text-[11px]">Transaction Summary</span>
                     <span className="text-indigo-400">Preview</span>
                   </div>
                   <div className="space-y-1">
@@ -1119,6 +1724,21 @@ export default function App() {
 
               <div className="flex gap-2 pt-2">
                 <button type="submit" className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white py-3 rounded-2xl font-bold transition-all shadow-lg shadow-indigo-600/20">{editingId ? 'Update Entry' : 'Save Transaction'}</button>
+                <button 
+                  type="button" 
+                  onClick={() => {
+                    setFormData(prev => ({
+                      ...prev,
+                      buyer: '',
+                      fabricName: '',
+                      challan: '',
+                      amount: ''
+                    }));
+                  }}
+                  className="px-6 bg-slate-800 hover:bg-slate-700 text-white rounded-2xl font-bold transition-all"
+                >
+                  Clear
+                </button>
                 {editingId && <button type="button" onClick={() => { setEditingId(null); setFormData({ date: new Date().toISOString().split('T')[0], pkgType: 'Non-Package' as const, challan: '', buyer: '', fabricName: '', type: 'receive' as const, amount: '', orderQty: '', delvA: '', delvB: '', priceA: '', billEntry: '', paidEntry: '', }); }} className="px-6 bg-slate-800 hover:bg-slate-700 text-white rounded-2xl font-bold transition-all">Cancel</button>}
               </div>
             </form>
@@ -1152,28 +1772,37 @@ export default function App() {
                   <FileText className="w-5 h-5 text-indigo-400" />
                 </div>
                 <div>
-                  <h3 className="text-xl font-black tracking-tight text-white">Transaction Ledger</h3>
-                  <p className="text-[10px] font-bold text-slate-500 uppercase tracking-[0.1em] mt-0.5">Detailed Operations History</p>
+                  <h3 className={cn("text-2xl md:text-xl font-black tracking-tight", headingColor)}>Transaction Ledger</h3>
+                  <p className={cn("text-[10px] md:text-[10px] font-bold uppercase tracking-[0.1em] mt-0.5", mutedText)}>Detailed Operations History</p>
                 </div>
               </div>
               <div className="relative w-full sm:w-64">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
-                <input type="text" placeholder="Search Buyer / Ref..." value={filterBuyer} onChange={e => setFilterBuyer(e.target.value)} className="w-full bg-slate-800 border-none rounded-xl pl-10 pr-4 py-2 text-sm focus:ring-2 focus:ring-indigo-500" />
+                <input type="text" placeholder="Search Buyer / Ref..." value={filterBuyer} onChange={e => setFilterBuyer(e.target.value)} className={cn("w-full border-none rounded-xl pl-10 pr-4 py-2 text-sm focus:ring-2 focus:ring-indigo-500", inputBg, theme === 'dark' ? "text-white" : "text-slate-900")} />
               </div>
             </div>
             
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
               <div className="space-y-1.5">
-                <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">Start Date</label>
-                <input type="date" value={filterStartDate} onChange={e => setFilterStartDate(e.target.value)} className="w-full bg-slate-800/50 border-none rounded-xl px-4 py-2 text-xs focus:ring-2 focus:ring-indigo-500" />
+                <label className={cn("text-[11px] font-bold uppercase tracking-wide", mutedText)}>Month</label>
+                <select value={filterMonth} onChange={e => setFilterMonth(e.target.value)} className={cn("w-full border-none rounded-xl px-4 py-2 text-xs focus:ring-2 focus:ring-indigo-500", theme === 'dark' ? "bg-slate-800/50 text-white" : "bg-slate-100 text-slate-900")}>
+                  <option value="all">All Months</option>
+                  {["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"].map(m => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
               </div>
               <div className="space-y-1.5">
-                <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">End Date</label>
-                <input type="date" value={filterEndDate} onChange={e => setFilterEndDate(e.target.value)} className="w-full bg-slate-800/50 border-none rounded-xl px-4 py-2 text-xs focus:ring-2 focus:ring-indigo-500" />
+                <label className={cn("text-[11px] font-bold uppercase tracking-wide", mutedText)}>Start Date</label>
+                <input type="date" value={filterStartDate} onChange={e => setFilterStartDate(e.target.value)} className={cn("w-full border-none rounded-xl px-4 py-2 text-xs focus:ring-2 focus:ring-indigo-500", theme === 'dark' ? "bg-slate-800/50 text-white" : "bg-slate-100 text-slate-900")} />
               </div>
               <div className="space-y-1.5">
-                <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">Trans. Type</label>
-                <select value={filterType} onChange={e => setFilterType(e.target.value as any)} className="w-full bg-slate-800/50 border-none rounded-xl px-4 py-2 text-xs focus:ring-2 focus:ring-indigo-500">
+                <label className={cn("text-[11px] font-bold uppercase tracking-wide", mutedText)}>End Date</label>
+                <input type="date" value={filterEndDate} onChange={e => setFilterEndDate(e.target.value)} className={cn("w-full border-none rounded-xl px-4 py-2 text-xs focus:ring-2 focus:ring-indigo-500", theme === 'dark' ? "bg-slate-800/50 text-white" : "bg-slate-100 text-slate-900")} />
+              </div>
+              <div className="space-y-1.5">
+                <label className={cn("text-[11px] font-bold uppercase tracking-wide", mutedText)}>Trans. Type</label>
+                <select value={filterType} onChange={e => setFilterType(e.target.value as any)} className={cn("w-full border-none rounded-xl px-4 py-2 text-xs focus:ring-2 focus:ring-indigo-500", theme === 'dark' ? "bg-slate-800/50 text-white" : "bg-slate-100 text-slate-900")}>
                   <option value="all">All Types</option>
                   <option value="receive">Receive</option>
                   <option value="delivery">Delivery</option>
@@ -1181,19 +1810,49 @@ export default function App() {
                 </select>
               </div>
               <div className="space-y-1.5">
-                <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">Pkg. Type</label>
-                <select value={filterPkgType} onChange={e => setFilterPkgType(e.target.value as any)} className="w-full bg-slate-800/50 border-none rounded-xl px-4 py-2 text-xs focus:ring-2 focus:ring-indigo-500">
+                <label className={cn("text-[11px] font-bold uppercase tracking-wide", mutedText)}>Pkg. Type</label>
+                <select value={filterPkgType} onChange={e => setFilterPkgType(e.target.value as any)} className={cn("w-full border-none rounded-xl px-4 py-2 text-xs focus:ring-2 focus:ring-indigo-500", theme === 'dark' ? "bg-slate-800/50 text-white" : "bg-slate-100 text-slate-900")}>
                   <option value="all">All Packages</option>
                   <option value="Package">Package</option>
                   <option value="Non-Package">Non-Package</option>
                 </select>
               </div>
             </div>
+
+            {/* Filtered Summary Results */}
+            <div className={cn(
+              "grid grid-cols-2 md:grid-cols-5 gap-3 p-4 rounded-2xl border",
+              theme === 'dark' ? "bg-white/[0.02] border-white/5" : "bg-slate-50 border-slate-200"
+            )}>
+              <div className="flex flex-col">
+                <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">Total Received</span>
+                <span className="text-sm font-black text-blue-400">{filteredStats.received.toLocaleString()} Yds</span>
+              </div>
+              <div className="flex flex-col">
+                <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">Total Ordered</span>
+                <span className="text-sm font-black text-amber-400">{filteredStats.ordered.toLocaleString()} Yds</span>
+              </div>
+              <div className="flex flex-col">
+                <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">Actual Delivered</span>
+                <span className="text-sm font-black text-indigo-400">{filteredStats.actualDelivered.toLocaleString()} Yds</span>
+              </div>
+              <div className="flex flex-col">
+                <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">Total Bill</span>
+                <span className="text-sm font-black text-indigo-400">৳ {filteredStats.bill.toLocaleString()}</span>
+              </div>
+              <div className="flex flex-col">
+                <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">Total Paid</span>
+                <span className="text-sm font-black text-emerald-400">৳ {filteredStats.paid.toLocaleString()}</span>
+              </div>
+            </div>
           </div>
           <div className="overflow-x-auto custom-scrollbar">
             <table className="w-full text-left border-collapse">
               <thead>
-                <tr className="bg-slate-800/50 text-[11px] font-bold text-slate-400 uppercase tracking-[0.15em] border-y border-white/5">
+                <tr className={cn(
+                  "text-[11px] font-bold uppercase tracking-[0.15em] border-y",
+                  theme === 'dark' ? "bg-slate-800/50 text-slate-400 border-white/5" : "bg-slate-50 text-slate-600 border-slate-200"
+                )}>
                   <th className="px-6 py-5">Date</th>
                   <th className="px-6 py-5">Buyer / Ref</th>
                   <th className="px-6 py-5 text-center">Quantity Details</th>
@@ -1201,20 +1860,30 @@ export default function App() {
                   <th className="px-6 py-5 text-right">Actions</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-white/5">
-                {sortedTransactions.map(t => {
+              <tbody className={cn("divide-y", theme === 'dark' ? "divide-white/5" : "divide-slate-200")}>
+                {sortedTransactions.map((t, index) => {
                   const due = t.bill - t.paid;
                   return (
-                    <tr key={t.id} className={cn("group hover:bg-white/[0.03] transition-all duration-300 border-b border-white/5 last:border-0", due > 0 && "bg-rose-500/[0.02]")}>
+                    <tr key={t.id} className={cn(
+                      "group transition-all duration-300 border-b last:border-0", 
+                      theme === 'dark' 
+                        ? (index % 2 === 0 ? "bg-white/[0.02]" : "bg-transparent") 
+                        : (index % 2 === 0 ? "bg-slate-50/50" : "bg-white"),
+                      theme === 'dark' ? "hover:bg-white/[0.05] border-white/5" : "hover:bg-slate-100 border-slate-100",
+                      due > 0 ? (theme === 'dark' ? "bg-rose-500/[0.04]" : "bg-rose-500/[0.02]") : (due < 0 ? (theme === 'dark' ? "bg-emerald-500/[0.04]" : "bg-emerald-500/[0.02]") : "")
+                    )}>
                       <td className="px-6 py-5">
                         <div className="flex flex-col">
-                          <span className="text-sm font-bold text-white tracking-tight group-hover:text-indigo-400 transition-colors">{new Date(t.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}</span>
-                          <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mt-1">{t.pkgType}</span>
+                          <span className={cn(
+                            "text-sm font-bold tracking-tight group-hover:text-indigo-400 transition-colors",
+                            theme === 'dark' ? "text-white" : "text-slate-900"
+                          )}>{new Date(t.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}</span>
+                          <span className={cn("text-[10px] font-bold uppercase tracking-widest mt-1", mutedText)}>{t.pkgType}</span>
                         </div>
                       </td>
                       <td className="px-6 py-5">
                         <div className="flex flex-col">
-                          <span className="text-sm font-black text-slate-200 tracking-tight">{t.buyer}</span>
+                          <span className={cn("text-sm font-black tracking-tight", theme === 'dark' ? "text-slate-200" : "text-slate-800")}>{t.buyer}</span>
                           <div className="flex items-center gap-2 mt-1.5">
                             <span className="text-[10px] px-2 py-0.5 rounded-md bg-indigo-500/10 text-indigo-400 font-bold border border-indigo-500/20">Ref: {t.challan}</span>
                             <span className="text-[10px] px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-400 font-bold border border-emerald-500/20">{t.fabricName}</span>
@@ -1223,13 +1892,22 @@ export default function App() {
                       </td>
                       <td className="px-6 py-4 text-center">
                         {t.type === 'receive' && <span className="text-blue-400 font-bold">+{t.receiveQty} Yds</span>}
-                        {t.type === 'delivery' && <div className="flex flex-col items-center"><span className="text-rose-400 font-bold">-{t.orderQty} Yds</span><span className="text-[9px] text-slate-500">Delv: {t.delvA + t.delvB}</span></div>}
+                        {t.type === 'delivery' && (
+                          <div className="flex flex-col items-center gap-1">
+                            <span className="text-rose-400 font-bold text-xs">Ord: {t.orderQty}</span>
+                            <span className="text-indigo-400 font-black text-sm">Delv: {t.delvA + t.delvB}</span>
+                          </div>
+                        )}
                         {t.type === 'bill' && <span className="text-slate-600">—</span>}
                       </td>
                       <td className="px-6 py-4">
                         {t.bill > 0 && <div className="text-indigo-300 font-bold text-xs">Bill: ৳ {t.bill.toLocaleString()}</div>}
                         {t.paid > 0 && <div className="text-emerald-500 font-bold text-xs">Paid: ৳ {t.paid.toLocaleString()}</div>}
-                        {due > 0 && <div className="text-rose-500 font-bold text-xs mt-1">Due: ৳ {due.toLocaleString()}</div>}
+                        {due > 0 ? (
+                          <div className="text-rose-500 font-bold text-xs mt-1">Due: ৳ {due.toLocaleString()}</div>
+                        ) : due < 0 ? (
+                          <div className="text-emerald-500 font-bold text-xs mt-1">Advance: ৳ {Math.abs(due).toLocaleString()}</div>
+                        ) : null}
                         {t.bill === 0 && t.paid === 0 && <span className="text-slate-600">—</span>}
                       </td>
                       <td className="px-6 py-4 text-right"><div className="flex justify-end gap-2"><button onClick={() => editEntry(t)} className="p-2 hover:bg-white/5 rounded-lg text-slate-400 hover:text-indigo-400 transition-all"><Edit2 className="w-4 h-4" /></button><button onClick={() => deleteEntry(t.id)} className="p-2 hover:bg-white/5 rounded-lg text-slate-400 hover:text-rose-400 transition-all"><Trash2 className="w-4 h-4" /></button></div></td>
@@ -1241,12 +1919,29 @@ export default function App() {
           </div>
         </div>
 
-        <footer className="mt-20 py-12 border-t border-white/5 text-center print:hidden">
+        <footer className={cn(
+          "mt-20 py-12 border-t text-center print:hidden",
+          theme === 'dark' ? "border-white/5" : "border-slate-200"
+        )}>
           <div className="flex flex-col items-center gap-6">
-            <div className="flex items-center gap-3"><div className="bg-gradient-to-br from-indigo-500 to-purple-600 p-2 rounded-xl shadow-lg shadow-indigo-500/20"><Factory className="w-5 h-5 text-white" /></div><div className="text-left"><h4 className="text-sm font-black tracking-tight text-white leading-none">PROFABRIC</h4><p className="text-[8px] font-bold text-indigo-400 tracking-[0.2em] mt-1">ELITE LEDGER SYSTEMS</p></div></div>
-            <p className="text-xs text-slate-500 max-w-md px-6 leading-relaxed">The world-standard solution for textile inventory management and professional billing. Designed for precision, speed, and high-performance business tracking.</p>
-            <div className="flex flex-wrap justify-center gap-x-8 gap-y-4"><a href="#" className="text-[10px] font-bold text-slate-500 hover:text-indigo-400 uppercase tracking-widest transition-all">Privacy Policy</a><a href="#" className="text-[10px] font-bold text-slate-500 hover:text-indigo-400 uppercase tracking-widest transition-all">Terms of Service</a><a href="#" className="text-[10px] font-bold text-slate-500 hover:text-indigo-400 uppercase tracking-widest transition-all">Help Center</a><a href="#" className="text-[10px] font-bold text-slate-500 hover:text-indigo-400 uppercase tracking-widest transition-all">API Docs</a></div>
-            <div className="w-12 h-1 bg-gradient-to-r from-transparent via-indigo-500/20 to-transparent rounded-full" /><p className="text-[10px] text-slate-600 font-medium">© {new Date().getFullYear()} Profabric Elite. All rights reserved. Built for Excellence.</p>
+            <div className="flex items-center gap-3">
+              <div className="bg-gradient-to-br from-indigo-500 to-purple-600 p-2 rounded-xl shadow-lg shadow-indigo-500/20">
+                <Factory className="w-5 h-5 text-white" />
+              </div>
+              <div className="text-left">
+                <h4 className={cn("text-sm font-black tracking-tight leading-none", headingColor)}>PROFABRIC</h4>
+                <p className="text-[8px] font-bold text-indigo-400 tracking-[0.2em] mt-1">ELITE LEDGER SYSTEMS</p>
+              </div>
+            </div>
+            <p className={cn("text-xs max-w-md px-6 leading-relaxed", mutedText)}>The world-standard solution for textile inventory management and professional billing. Designed for precision, speed, and high-performance business tracking.</p>
+            <div className="flex flex-wrap justify-center gap-x-8 gap-y-4">
+              <a href="#" className={cn("text-[10px] font-bold hover:text-indigo-400 uppercase tracking-widest transition-all", mutedText)}>Privacy Policy</a>
+              <a href="#" className={cn("text-[10px] font-bold hover:text-indigo-400 uppercase tracking-widest transition-all", mutedText)}>Terms of Service</a>
+              <a href="#" className={cn("text-[10px] font-bold hover:text-indigo-400 uppercase tracking-widest transition-all", mutedText)}>Help Center</a>
+              <a href="#" className={cn("text-[10px] font-bold hover:text-indigo-400 uppercase tracking-widest transition-all", mutedText)}>API Docs</a>
+            </div>
+            <div className="w-12 h-1 bg-gradient-to-r from-transparent via-indigo-500/20 to-transparent rounded-full" />
+            <p className="text-[10px] text-slate-600 font-medium">© {new Date().getFullYear()} Profabric Elite. All rights reserved. Built for Excellence.</p>
           </div>
         </footer>
       </main>
@@ -1256,29 +1951,42 @@ export default function App() {
         {isProfileModalOpen && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setIsProfileModalOpen(false)} className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm" />
-            <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="relative w-full max-w-md glass-card p-8 rounded-[2.5rem] border-white/10 shadow-2xl bg-[#0f172a]">
-              <div className="flex justify-between items-center mb-8"><h3 className="text-xl font-black tracking-tight text-white">Edit Profile</h3><button onClick={() => setIsProfileModalOpen(false)} className="p-2 hover:bg-white/5 rounded-full text-slate-500 hover:text-white transition-all"><X className="w-5 h-5" /></button></div>
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }} 
+              animate={{ opacity: 1, scale: 1, y: 0 }} 
+              exit={{ opacity: 0, scale: 0.9, y: 20 }} 
+              className={cn(
+                "relative w-full max-w-md glass-card p-8 rounded-[2.5rem] border shadow-2xl transition-colors duration-500",
+                theme === 'dark' ? "bg-[#0f172a] border-white/10" : "bg-white border-slate-200"
+              )}
+            >
+              <div className="flex justify-between items-center mb-8">
+                <h3 className={cn("text-xl font-black tracking-tight", headingColor)}>Edit Profile</h3>
+                <button onClick={() => setIsProfileModalOpen(false)} className={cn("p-2 rounded-full transition-all", theme === 'dark' ? "hover:bg-white/5 text-slate-500 hover:text-white" : "hover:bg-slate-100 text-slate-400 hover:text-slate-900")}>
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
               <div className="flex flex-col items-center gap-8">
                 <div className="relative group">
-                  <div className="w-32 h-32 rounded-full bg-slate-800 ring-4 ring-indigo-500/20 overflow-hidden">
-                    {manager.photo ? <img src={manager.photo} alt="Manager" className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center bg-slate-900"><User className="w-12 h-12 text-slate-600" /></div>}
+                  <div className={cn("w-32 h-32 rounded-full ring-4 ring-indigo-500/20 overflow-hidden", inputBg)}>
+                    {manager.photo ? <img src={manager.photo} alt="Manager" className="w-full h-full object-cover" /> : <div className={cn("w-full h-full flex items-center justify-center", inputBgDeep)}><User className="w-12 h-12 text-slate-600" /></div>}
                   </div>
-                  <button onClick={() => fileInputRef.current?.click()} className="absolute bottom-0 right-0 bg-indigo-600 p-2.5 rounded-full border-4 border-[#0f172a] text-white shadow-xl hover:bg-indigo-500 transition-all">
+                  <button onClick={() => fileInputRef.current?.click()} className={cn("absolute bottom-0 right-0 p-2.5 rounded-full border-4 text-white shadow-xl hover:bg-indigo-500 transition-all", theme === 'dark' ? "bg-indigo-600 border-[#0f172a]" : "bg-indigo-600 border-white")}>
                     <Camera className="w-5 h-5" />
                   </button>
                 </div>
                 <div className="w-full space-y-2">
-                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest px-1">Manager Full Name</label>
-                  <input type="text" value={tempManagerName} onChange={(e) => setTempManagerName(e.target.value)} className="w-full bg-slate-900 border border-white/5 rounded-2xl px-5 py-4 text-white font-bold focus:ring-2 focus:ring-indigo-500 outline-none transition-all" placeholder="Enter your name" />
+                  <label className={cn("text-[10px] font-bold uppercase tracking-widest px-1", mutedText)}>Manager Full Name</label>
+                  <input type="text" value={tempManagerName} onChange={(e) => setTempManagerName(e.target.value)} className={cn("w-full border rounded-2xl px-5 py-4 font-bold focus:ring-2 focus:ring-indigo-500 outline-none transition-all", inputBgDeep, borderColor, theme === 'dark' ? "text-white" : "text-slate-900")} placeholder="Enter your name" />
                 </div>
 
-                <div className="w-full pt-6 border-t border-white/5 space-y-4">
-                  <h4 className="text-[10px] font-black text-slate-500 uppercase tracking-widest px-1">Data Management</h4>
+                <div className={cn("w-full pt-6 border-t space-y-4", borderColor)}>
+                  <h4 className={cn("text-[10px] font-black uppercase tracking-widest px-1", mutedText)}>Data Management</h4>
                   <div className="grid grid-cols-2 gap-3">
-                    <button onClick={exportData} className="flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 text-white py-3.5 rounded-2xl text-xs font-bold transition-all active:scale-95">
+                    <button onClick={exportData} className={cn("flex items-center justify-center gap-2 py-3.5 rounded-2xl text-xs font-bold transition-all active:scale-95", theme === 'dark' ? "bg-slate-800 hover:bg-slate-700 text-white" : "bg-slate-100 hover:bg-slate-200 text-slate-900")}>
                       <Download className="w-4 h-4" /> Export Backup
                     </button>
-                    <button onClick={() => document.getElementById('import-input')?.click()} className="flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 text-white py-3.5 rounded-2xl text-xs font-bold transition-all active:scale-95">
+                    <button onClick={() => document.getElementById('import-input')?.click()} className={cn("flex items-center justify-center gap-2 py-3.5 rounded-2xl text-xs font-bold transition-all active:scale-95", theme === 'dark' ? "bg-slate-800 hover:bg-slate-700 text-white" : "bg-slate-100 hover:bg-slate-200 text-slate-900")}>
                       <Upload className="w-4 h-4" /> Import Backup
                     </button>
                     <input id="import-input" type="file" accept=".json" onChange={importData} className="hidden" />
@@ -1286,7 +1994,7 @@ export default function App() {
                 </div>
 
                 <div className="w-full flex gap-3 pt-4">
-                  <button onClick={() => setIsProfileModalOpen(false)} className="flex-1 py-4 rounded-2xl bg-slate-800 hover:bg-slate-700 text-white font-bold transition-all">Cancel</button>
+                  <button onClick={() => setIsProfileModalOpen(false)} className={cn("flex-1 py-4 rounded-2xl font-bold transition-all", theme === 'dark' ? "bg-slate-800 hover:bg-slate-700 text-white" : "bg-slate-100 hover:bg-slate-200 text-slate-900")}>Cancel</button>
                   <button onClick={saveProfile} className="flex-1 py-4 rounded-2xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold transition-all shadow-lg shadow-indigo-600/20 flex items-center justify-center gap-2">
                     <Check className="w-5 h-5" /> Save Changes
                   </button>
@@ -1300,10 +2008,27 @@ export default function App() {
         {deleteConfirmId !== null && (
           <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setDeleteConfirmId(null)} className="absolute inset-0 bg-slate-950/90 backdrop-blur-md" />
-            <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="relative w-full max-w-sm glass-card p-8 rounded-[2.5rem] border-rose-500/20 shadow-2xl bg-[#0f172a]">
-              <div className="flex flex-col items-center text-center gap-6"><div className="w-20 h-20 rounded-full bg-rose-500/10 flex items-center justify-center"><Trash2 className="w-10 h-10 text-rose-500" /></div>
-                <div><h3 className="text-xl font-black text-white mb-2">Confirm Delete</h3><p className="text-sm text-slate-400">Are you sure you want to remove this transaction? This action cannot be undone.</p></div>
-                <div className="w-full flex flex-col gap-3 pt-4"><button onClick={confirmDelete} className="w-full py-4 rounded-2xl bg-rose-600 hover:bg-rose-500 text-white font-bold transition-all shadow-lg shadow-rose-600/20">Yes, Delete Entry</button><button onClick={() => setDeleteConfirmId(null)} className="w-full py-4 rounded-2xl bg-slate-800 hover:bg-slate-700 text-white font-bold transition-all">Cancel</button></div>
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }} 
+              animate={{ opacity: 1, scale: 1, y: 0 }} 
+              exit={{ opacity: 0, scale: 0.9, y: 20 }} 
+              className={cn(
+                "relative w-full max-w-sm glass-card p-8 rounded-[2.5rem] border shadow-2xl transition-colors duration-500",
+                theme === 'dark' ? "bg-[#0f172a] border-rose-500/20" : "bg-white border-rose-200"
+              )}
+            >
+              <div className="flex flex-col items-center text-center gap-6">
+                <div className="w-20 h-20 rounded-full bg-rose-500/10 flex items-center justify-center">
+                  <Trash2 className="w-10 h-10 text-rose-500" />
+                </div>
+                <div>
+                  <h3 className={cn("text-xl font-black mb-2", headingColor)}>Confirm Delete</h3>
+                  <p className={cn("text-sm", mutedText)}>Are you sure you want to remove this transaction? This action cannot be undone.</p>
+                </div>
+                <div className="w-full flex flex-col gap-3 pt-4">
+                  <button onClick={confirmDelete} className="w-full py-4 rounded-2xl bg-rose-600 hover:bg-rose-500 text-white font-bold transition-all shadow-lg shadow-rose-600/20">Yes, Delete Entry</button>
+                  <button onClick={() => setDeleteConfirmId(null)} className={cn("w-full py-4 rounded-2xl font-bold transition-all", theme === 'dark' ? "bg-slate-800 hover:bg-slate-700 text-white" : "bg-slate-100 hover:bg-slate-200 text-slate-900")}>Cancel</button>
+                </div>
               </div>
             </motion.div>
           </div>
@@ -1313,22 +2038,88 @@ export default function App() {
   );
 }
 
-function NavItem({ icon, label, active = false, onClick }: { icon: React.ReactNode, label: string, active?: boolean, onClick?: () => void }) {
+function NavItem({ icon, label, active = false, onClick, theme = 'dark' }: { icon: React.ReactNode, label: string, active?: boolean, onClick?: () => void, theme?: 'dark' | 'light' }) {
   return (
-    <button onClick={onClick} className={cn("w-full flex items-center gap-3 px-4 py-3 rounded-xl font-bold text-sm transition-all", active ? "bg-indigo-600/10 text-indigo-400 border border-indigo-500/20" : "text-slate-500 hover:text-slate-300 hover:bg-white/[0.02]")}>{icon}{label}</button>
+    <button 
+      onClick={onClick} 
+      className={cn(
+        "w-full flex items-center gap-3 px-4 py-3 rounded-xl font-bold text-sm transition-all", 
+        active 
+          ? "bg-indigo-600/10 text-indigo-400 border border-indigo-500/20" 
+          : cn(
+              "text-slate-500",
+              theme === 'dark' ? "hover:text-slate-300 hover:bg-white/[0.02]" : "hover:text-slate-900 hover:bg-slate-100"
+            )
+      )}
+    >
+      {icon}
+      {label}
+    </button>
   );
 }
 
-function StatCard({ label, value, unit, icon, color }: { label: string, value: string, unit: string, icon: React.ReactNode, color: 'blue' | 'rose' | 'emerald' | 'amber' }) {
+function StatCard({ label, value, unit, icon, color, theme = 'dark' }: { label: string, value: string, unit: string, icon: React.ReactNode, color: 'blue' | 'rose' | 'emerald' | 'amber', theme?: 'dark' | 'light' }) {
   const colors = {
-    blue: { border: "border-l-blue-500", bg: "from-blue-500/10 to-transparent", icon: "text-blue-400", glow: "group-hover:shadow-blue-500/10" },
-    rose: { border: "border-l-rose-500", bg: "from-rose-500/10 to-transparent", icon: "text-rose-400", glow: "group-hover:shadow-rose-500/10" },
-    emerald: { border: "border-l-emerald-500", bg: "from-emerald-500/10 to-transparent", icon: "text-emerald-400", glow: "group-hover:shadow-emerald-500/10" },
-    amber: { border: "border-l-amber-500", bg: "from-amber-500/10 to-transparent", icon: "text-amber-400", glow: "group-hover:shadow-amber-500/10" },
+    blue: { border: "border-l-blue-500", bg: "from-blue-500/20 to-transparent", icon: "text-blue-400", glow: "group-hover:shadow-blue-500/20", shadow: "shadow-blue-900/20" },
+    rose: { border: "border-l-rose-500", bg: "from-rose-500/20 to-transparent", icon: "text-rose-400", glow: "group-hover:shadow-rose-500/20", shadow: "shadow-rose-900/20" },
+    emerald: { border: "border-l-emerald-500", bg: "from-emerald-500/20 to-transparent", icon: "text-emerald-400", glow: "group-hover:shadow-emerald-500/20", shadow: "shadow-emerald-900/20" },
+    amber: { border: "border-l-amber-500", bg: "from-amber-500/20 to-transparent", icon: "text-amber-400", glow: "group-hover:shadow-amber-500/20", shadow: "shadow-amber-900/20" },
   };
+  
   return (
-    <div className={cn("glass-card p-6 rounded-[2rem] border-l-4 transition-all duration-500 group relative overflow-hidden", colors[color].border, colors[color].glow)}>
-      <div className={cn("absolute inset-0 bg-gradient-to-br opacity-0 group-hover:opacity-100 transition-opacity duration-500", colors[color].bg)} /><div className="relative z-10"><div className="flex justify-between items-start mb-4"><p className="text-[10px] font-bold text-slate-500 uppercase tracking-[0.2em]">{label}</p><div className={cn("p-2 rounded-xl bg-white/5", colors[color].icon)}>{icon}</div></div><div className="flex items-baseline gap-2"><h3 className="text-3xl font-black tracking-tighter text-white">{value}</h3><span className="text-xs font-bold text-slate-500 uppercase">{unit}</span></div></div>
-    </div>
+    <motion.div 
+      whileHover={{ y: -8, scale: 1.02 }}
+      transition={{ type: "spring", stiffness: 400, damping: 10 }}
+      className={cn(
+        "glass-card p-5 md:p-7 rounded-[2rem] border-l-4 transition-all duration-500 group relative overflow-hidden shadow-2xl", 
+        colors[color].border, 
+        colors[color].glow,
+        colors[color].shadow,
+        theme === 'dark' ? "bg-slate-900/80 backdrop-blur-xl border-white/5" : "bg-white shadow-xl border-slate-200"
+      )}
+    >
+      {/* 3D Inner Glow Effect */}
+      <div className={cn("absolute inset-0 bg-gradient-to-br opacity-0 group-hover:opacity-100 transition-opacity duration-700", colors[color].bg)} />
+      <div className="absolute -right-4 -top-4 w-24 h-24 bg-white/5 rounded-full blur-3xl group-hover:bg-white/10 transition-all duration-700" />
+      
+      <div className="relative z-10">
+        <div className="flex justify-between items-start mb-4 md:mb-6">
+          <div className="space-y-1">
+            <p className={cn("text-xs md:text-sm font-black uppercase tracking-[0.2em]", theme === 'dark' ? "text-slate-300" : "text-slate-600")}>
+              {label}
+            </p>
+            <div className={cn("h-1 w-12 rounded-full bg-gradient-to-r from-transparent via-indigo-500 to-transparent opacity-50", colors[color].icon)} />
+          </div>
+          <div className={cn(
+            "p-2.5 md:p-3 rounded-2xl transition-all duration-500 shadow-lg transform group-hover:rotate-12", 
+            theme === 'dark' ? "bg-slate-800/50 border border-white/10" : "bg-slate-100 border border-slate-200", 
+            colors[color].icon
+          )}>
+            {icon}
+          </div>
+        </div>
+        
+        <div className="flex items-baseline gap-2">
+          <h3 className={cn(
+            "text-2xl md:text-4xl font-black tracking-tighter drop-shadow-sm", 
+            theme === 'dark' ? "text-white" : "text-slate-900"
+          )}>
+            {value}
+          </h3>
+          <span className={cn(
+            "text-[10px] md:text-sm font-black uppercase tracking-widest", 
+            theme === 'dark' ? "text-slate-500" : "text-slate-400"
+          )}>
+            {unit}
+          </span>
+        </div>
+        
+        {/* Bottom Decorative Line */}
+        <div className={cn(
+          "mt-4 h-[1px] w-full bg-gradient-to-r from-transparent via-white/5 to-transparent",
+          theme === 'dark' ? "via-white/5" : "via-slate-200"
+        )} />
+      </div>
+    </motion.div>
   );
 }

@@ -7,12 +7,20 @@
 
 @layer base {
   body {
-    @apply bg-slate-950 text-slate-50 font-sans;
+    @apply transition-colors duration-500;
   }
 }
 
 .glass-card {
-  @apply bg-slate-900/50 backdrop-blur-xl border border-white/10 shadow-2xl;
+  @apply backdrop-blur-xl transition-all duration-500;
+}
+
+.dark .glass-card {
+  @apply bg-slate-900/50 border-white/10 shadow-2xl;
+}
+
+.light .glass-card {
+  @apply bg-white/80 border-slate-200 shadow-xl;
 }
 
 .custom-scrollbar::-webkit-scrollbar {
@@ -20,7 +28,15 @@
 }
 
 .custom-scrollbar::-webkit-scrollbar-thumb {
-  @apply bg-slate-800 rounded-full;
+  @apply rounded-full;
+}
+
+.dark .custom-scrollbar::-webkit-scrollbar-thumb {
+  @apply bg-slate-800;
+}
+
+.light .custom-scrollbar::-webkit-scrollbar-thumb {
+  @apply bg-slate-200;
 }
 
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
