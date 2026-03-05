@@ -13,26 +13,37 @@ async function startServer() {
   const app = express();
   app.use(express.json({ limit: '50mb' }));
 
-  // Initialize data file if it doesn't exist
-  if (!fs.existsSync(DATA_FILE)) {
-    fs.writeFileSync(DATA_FILE, JSON.stringify({ transactions: [], manager: { name: 'Manager Name', photo: null } }));
-  }
-
   // API Routes
   app.get('/api/data', (req, res) => {
+    console.log('GET /api/data - Reading data from file');
     try {
+      if (!fs.existsSync(DATA_FILE)) {
+        console.log('Data file not found, creating initial state');
+        const initialState = { 
+          transactions: [], 
+          manager: { name: 'Manager Name', photo: null }, 
+          notes: [],
+          runningPrograms: {} 
+        };
+        fs.writeFileSync(DATA_FILE, JSON.stringify(initialState, null, 2));
+        return res.json(initialState);
+      }
       const data = fs.readFileSync(DATA_FILE, 'utf8');
       res.json(JSON.parse(data));
     } catch (error) {
+      console.error('Error reading data file:', error);
       res.status(500).json({ error: 'Failed to read data' });
     }
   });
 
   app.post('/api/data', (req, res) => {
+    console.log('POST /api/data - Saving data to file');
     try {
       fs.writeFileSync(DATA_FILE, JSON.stringify(req.body, null, 2));
+      console.log('Data saved successfully to', DATA_FILE);
       res.json({ success: true });
     } catch (error) {
+      console.error('Error writing data file:', error);
       res.status(500).json({ error: 'Failed to save data' });
     }
   });
